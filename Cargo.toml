@@ -1,0 +1,15 @@
+[package]
+name = "pc-computer-doctor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+color-eyre = "0.6.3"
+cpal = { version = "0.15.3", features = ["jack"] }
+crossterm = "0.28.1"
+midir = "0.10.1"
+midly = "0.5.3"
+miniserde = "0.1.41"
+rand = "0.9.0"
+ratatui = "0.29.0"
+ringbuf = "0.4.7"
