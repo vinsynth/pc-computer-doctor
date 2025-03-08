@@ -267,7 +267,12 @@ impl Tui {
                 '.'
             }
         }))))
-        .block(Block::bordered().bold().title(" assign to pad: ").padding(Padding::horizontal(6)))
+        .block(
+            Block::bordered()
+                .bold()
+                .title(" assign to pad: ")
+                .padding(Padding::horizontal(6)),
+        )
         .wrap(Wrap { trim: true })
         .render(pad_area, buf);
     }

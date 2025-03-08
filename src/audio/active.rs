@@ -26,12 +26,21 @@ impl Wav {
     }
 
     pub fn seek(&mut self, offset: i64) -> Result<(), std::io::Error> {
-        self.file.seek(SeekFrom::Start(44 + (offset.rem_euclid(self.len as i64) as u64)))?;
+        self.file.seek(SeekFrom::Start(
+            44 + (offset.rem_euclid(self.len as i64) as u64),
+        ))?;
         Ok(())
+    }
+
+    pub fn seek_quantized(&mut self, offset: i64, step: f32) -> Result<(), std::io::Error> {
+        let shift = ((step - 0.5) / self.steps as f32 * self.len as f32) as i64 & !1;
+        self.seek(offset + shift)
     }
 }
 
 pub struct Onset {
+    /// source onset index
+    pub index: u8,
     pub wav: Wav,
     pub start: u64,
 }
@@ -45,6 +54,7 @@ pub enum Input {
 pub enum State {
     Input(Input),
     Ghost(Input, f32),
+    Phrase,
 }
 
 impl Default for State {
@@ -54,7 +64,7 @@ impl Default for State {
 }
 
 pub struct Phrase {
-    /// phrase index
+    /// source phrase index
     pub index: u8,
     /// next event index
     pub next: usize,
