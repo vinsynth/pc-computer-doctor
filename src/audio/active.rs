@@ -41,6 +41,7 @@ impl Wav {
 pub struct Onset {
     /// source onset index
     pub index: u8,
+    pub pan: f32,
     pub wav: Wav,
     pub start: u64,
 }

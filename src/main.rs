@@ -20,13 +20,14 @@ use ringbuf::{
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let (tui_tx, tui_rx) = std::sync::mpsc::channel::<tui::Cmd>();
-    let (audio_tx, audio_rx) = std::sync::mpsc::channel::<audio::Cmd>();
+    let (input_tui_tx, input_tui_rx) = std::sync::mpsc::channel::<tui::Cmd>();
+    let (input_audio_tx, input_audio_rx) = std::sync::mpsc::channel::<audio::Cmd>();
+    let (audio_tui_tx, audio_tui_rx) = std::sync::mpsc::channel::<tui::Cmd>();
 
-    let ring = HeapRb::<f32>::new(GRAIN_LEN * 2);
+    let ring = HeapRb::<[f32; 2]>::new(GRAIN_LEN * 2);
     let (mut producer, consumer) = ring.split();
     for _ in 0..GRAIN_LEN {
-        producer.try_push(0.).unwrap();
+        producer.try_push([0., 0.]).unwrap();
     }
 
     let hosts = cpal::available_hosts();
@@ -52,7 +53,7 @@ fn main() -> Result<()> {
     };
     let host = cpal::host_from_id(id)?;
 
-    let devices = host.output_devices()?.collect::<Vec<_>>();
+    let devices = host.output_devices().into_iter().flatten().collect::<Vec<_>>();
     let device = match devices.len() {
         0 => return Err(color_eyre::Report::msg("no audio device found")),
         1 => {
@@ -103,7 +104,7 @@ fn main() -> Result<()> {
                 .ok_or(color_eyre::Report::msg("invalid input port selected"))?
         }
     };
-    let input_handler = InputHandler::new(tui_tx, audio_tx)?;
+    let input_handler = InputHandler::new(input_tui_tx, input_audio_tx)?;
     let midi_in = midi_in
         .connect(
             in_port,
@@ -119,7 +120,7 @@ fn main() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
     let pads_handle = std::thread::spawn(move || -> Result<()> {
-        audio::Pads::new().run(audio_rx, producer)?;
+        audio::Pads::new(audio_tui_tx).run(input_audio_rx, producer)?;
         Ok(())
     });
 
@@ -135,7 +136,7 @@ fn main() -> Result<()> {
     });
 
     let mut terminal = ratatui::init();
-    Tui::default().run(&mut terminal, tui_rx)?;
+    Tui::default().run(&mut terminal, input_tui_rx, audio_tui_rx)?;
     ratatui::restore();
 
     // pads thread completes once audio_tx held by input_handler dropped in _in_connection thread
@@ -151,7 +152,7 @@ fn main() -> Result<()> {
 fn play<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    mut consumer: ringbuf::CachingCons<std::sync::Arc<HeapRb<f32>>>,
+    mut consumer: ringbuf::CachingCons<std::sync::Arc<HeapRb<[f32; 2]>>>,
 ) -> Result<()>
 where
     T: SizedSample + FromSample<f32>,
@@ -161,12 +162,10 @@ where
     let out_fn = move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
         for frame in data.chunks_mut(channels) {
             let value = match consumer.try_pop() {
-                Some(s) => T::from_sample(s),
-                None => T::from_sample(0.),
+                Some([l, r]) => [T::from_sample(l), T::from_sample(r)],
+                None => [T::from_sample(0.); 2],
             };
-            for sample in frame.iter_mut() {
-                *sample = value;
-            }
+            frame.copy_from_slice(&value[..]);
         }
     };
     let err_fn = |err| eprintln!("error occurred on stream: {}", err);

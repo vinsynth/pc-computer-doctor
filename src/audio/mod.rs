@@ -1,6 +1,5 @@
 mod active;
-
-use crate::input::Global;
+use crate::{input::Global, tui};
 
 use std::{io::Read, mem::MaybeUninit};
 
@@ -98,7 +97,6 @@ struct Pad {
     phrase_weight: u8,
 }
 
-#[derive(Default)]
 pub struct Pads {
     step: f32,
     state: active::State,
@@ -110,6 +108,7 @@ pub struct Pads {
     drift: f32,
     width: f32,
     tempo: f32,
+    tui_tx: std::sync::mpsc::Sender<tui::Cmd>,
 }
 
 impl Pads {
@@ -119,8 +118,9 @@ impl Pads {
 
     fn read_grain(
         tempo: f32,
+        width: f32,
         onset: &mut active::Onset,
-        producer: &mut CachingProd<std::sync::Arc<HeapRb<f32>>>,
+        producer: &mut CachingProd<std::sync::Arc<HeapRb<[f32; 2]>>>,
     ) -> Result<()> {
         // TODO: tempo sync via resampling OR jump on step boundary
         let rem = (GRAIN_LEN as f32 * 2. * tempo / onset.wav.tempo) as usize & !1;
@@ -149,57 +149,63 @@ impl Pads {
             let word_b =
                 i16::from_le_bytes(i16_buffer) as f32 / i16::MAX as f32 * (1. - read_idx.fract());
 
-            while producer.try_push(word_a + word_b).is_err() {}
+            let sample = word_a + word_b;
+            let l = sample * (1. + width * ((onset.pan - 0.5).abs() - 1.));
+            let r = sample * (1. + width * ((onset.pan + 0.5).abs() - 1.));
+            while producer.try_push([l, r]).is_err() {}
         }
         Ok(())
     }
 
     fn handle_active_input(
         tempo: f32,
+        width: f32,
         input: &mut active::Input,
-        producer: &mut CachingProd<std::sync::Arc<HeapRb<f32>>>,
+        producer: &mut CachingProd<std::sync::Arc<HeapRb<[f32; 2]>>>,
     ) -> Result<()> {
         match input {
             active::Input::Sync => {
                 for _ in 0..GRAIN_LEN {
-                    while producer.try_push(0.).is_err() {}
+                    while producer.try_push([0., 0.]).is_err() {}
                 }
                 Ok(())
             }
-            active::Input::Hold(onset) => Pads::read_grain(tempo, onset, producer),
+            active::Input::Hold(onset) => Pads::read_grain(tempo, width, onset, producer),
             active::Input::Loop(onset, len) => {
                 let wav = &mut onset.wav;
                 let pos = wav.pos()?;
                 let end =
                     onset.start + (f32::from(*len) * wav.len as f32 / wav.steps as f32) as u64;
-                // FIXME: too fast retriggers; fault of rem, presumeably
-                // instead of rem, could just seek back by Loop.len in bytes
-                // retrigger with deficit
-                let rem = if pos < onset.start {
-                    end as i64 - (pos + wav.len) as i64
-                } else {
-                    end as i64 - pos as i64
-                };
-                if rem < 0 {
-                    wav.seek((onset.start as i64 - rem) & !1)?;
+                // TODO: quantization? how?
+                if end < pos || pos < onset.start && end < pos + wav.len {
+                    wav.seek(onset.start as i64)?;
                 }
-                Pads::read_grain(tempo, onset, producer)
+                Pads::read_grain(tempo, width, onset, producer)
             }
         }
     }
 
-    pub fn new() -> Self {
+    pub fn new(tui_tx: std::sync::mpsc::Sender<tui::Cmd>) -> Self {
         Pads {
             // default 172 bpm in sixteenths
             tempo: 688.,
-            ..Default::default()
+            step: 0.5,
+            state: active::State::Input(active::Input::Sync),
+            phrase: None,
+            record: None,
+            tui_tx,
+            pads: core::array::from_fn(|_| Pad::default()),
+            bias: 0.,
+            roll: 0.,
+            drift: 0.,
+            width: 0.,
         }
     }
 
     pub fn run(
         &mut self,
         cmd_rx: std::sync::mpsc::Receiver<Cmd>,
-        mut producer: CachingProd<std::sync::Arc<HeapRb<f32>>>,
+        mut producer: CachingProd<std::sync::Arc<HeapRb<[f32; 2]>>>,
     ) -> Result<()> {
         loop {
             match cmd_rx.try_recv() {
@@ -223,7 +229,7 @@ impl Pads {
         }
     }
 
-    fn tick(&mut self, producer: &mut CachingProd<std::sync::Arc<HeapRb<f32>>>) -> Result<()> {
+    fn tick(&mut self, producer: &mut CachingProd<std::sync::Arc<HeapRb<[f32; 2]>>>) -> Result<()> {
         self.handle_state(producer)?;
         self.advance_steps()?;
         Ok(())
@@ -231,14 +237,14 @@ impl Pads {
 
     fn handle_state(
         &mut self,
-        producer: &mut CachingProd<std::sync::Arc<HeapRb<f32>>>,
+        producer: &mut CachingProd<std::sync::Arc<HeapRb<[f32; 2]>>>,
     ) -> Result<()> {
         match &mut self.state {
             active::State::Input(input) => {
-                Pads::handle_active_input(self.tempo, input, producer)?;
+                Pads::handle_active_input(self.tempo, self.width, input, producer)?;
             }
             active::State::Ghost(input, rem) => {
-                Pads::handle_active_input(self.tempo, input, producer)?;
+                Pads::handle_active_input(self.tempo, self.width, input, producer)?;
                 *rem -= Pads::delta(self.tempo);
                 if *rem <= 0. {
                     if let Some((input, rem)) = self.generate_ghost()? {
@@ -252,6 +258,7 @@ impl Pads {
                 if let Some(active::Phrase { input, .. }) = self.phrase.as_mut() {
                     Pads::handle_active_input(
                         self.tempo,
+                        self.width,
                         input.as_mut().unwrap_or(&mut active::Input::Sync),
                         producer,
                     )?;
@@ -293,13 +300,18 @@ impl Pads {
                 }
                 match &self.state {
                     active::State::Input(input) if !matches!(input, active::Input::Sync) => (),
-                    active::State::Phrase => if let Some((input, rem)) = self.generate_ghost()? {
-                        self.state = active::State::Ghost(input, rem);
-                    } else {
-                        self.state = active::State::Input(active::Input::Sync);
+                    active::State::Phrase => {
+                        if let Some((input, rem)) = self.generate_ghost()? {
+                            self.state = active::State::Ghost(input, rem);
+                        } else {
+                            self.state = active::State::Input(active::Input::Sync);
+                        }
                     }
-                    _ => if matches!(&self.phrase, Some(active::Phrase { input: Some(input), .. }) if !matches!(input, active::Input::Sync)) {
-                        self.state = active::State::Phrase;
+                    _ => {
+                        if matches!(&self.phrase, Some(active::Phrase { input: Some(input), .. }) if !matches!(input, active::Input::Sync))
+                        {
+                            self.state = active::State::Phrase;
+                        }
                     }
                 }
             }
@@ -317,7 +329,11 @@ impl Pads {
             }
         }
         // advance global qauntize step
+        let prev = self.step;
         self.step = (self.step + Pads::delta(self.tempo)).fract();
+        if self.step.round() > prev.round() {
+            self.tui_tx.send(tui::Cmd::Clock)?;
+        }
         Ok(())
     }
 
@@ -328,6 +344,10 @@ impl Pads {
             [None, Some(_)] => Some(true),
             [Some(_), Some(_)] => Some(rand::random_bool(self.bias as f64)),
         }
+    }
+
+    fn generate_pan(&self, index: u8) -> f32 {
+        index as f32 / 8. - 0.5
     }
 
     fn generate_ghost(&mut self) -> Result<Option<(active::Input, f32)>> {
@@ -350,7 +370,12 @@ impl Pads {
                 self.pads[index].onsets[alt as usize].as_ref().unwrap();
             let mut wav = active::Wav::open(wav)?;
             wav.seek_quantized(*start as i64, self.step)?;
-            let onset = active::Onset { index: index as u8, wav, start: *start };
+            let onset = active::Onset {
+                index: index as u8,
+                pan: self.generate_pan(index as u8),
+                wav,
+                start: *start,
+            };
             if rand::random_bool(self.roll as f64) {
                 let steps = rand::random_range(0..STEP_DIVISOR as usize) as f32;
                 let len = Fraction::new(rand::random_range(0..STEP_DIVISOR), STEP_DIVISOR);
@@ -385,7 +410,12 @@ impl Pads {
                         .unwrap();
                     let mut wav = active::Wav::open(wav)?;
                     wav.seek_quantized(*start as i64, self.step)?;
-                    let onset = active::Onset { index: *index, wav, start: *start };
+                    let onset = active::Onset {
+                        index: *index,
+                        pan: self.generate_pan(*index),
+                        wav,
+                        start: *start,
+                    };
                     active::Input::Hold(onset)
                 } else {
                     active::Input::Sync
@@ -397,7 +427,12 @@ impl Pads {
                         .as_ref()
                         .unwrap();
                     let wav = active::Wav::open(wav)?;
-                    let onset = active::Onset { index: *index, wav, start: *start };
+                    let onset = active::Onset {
+                        index: *index,
+                        pan: self.generate_pan(*index),
+                        wav,
+                        start: *start,
+                    };
                     active::Input::Loop(onset, *len)
                 } else {
                     active::Input::Sync
@@ -471,27 +506,45 @@ impl Pads {
                         .unwrap();
                     let mut wav = active::Wav::open(wav)?;
                     wav.seek_quantized(*start as i64, self.step)?;
-                    let onset = active::Onset { index, wav, start: *start };
+                    let onset = active::Onset {
+                        index,
+                        pan: self.generate_pan(index),
+                        wav,
+                        start: *start,
+                    };
                     self.state = active::State::Input(active::Input::Hold(onset));
                 }
             }
             Input::Loop { index, len } => {
                 match &mut self.state {
-                    active::State::Input(active::Input::Hold(onset) | active::Input::Loop(onset, .. )) if onset.index == index => {
+                    active::State::Input(
+                        active::Input::Hold(onset) | active::Input::Loop(onset, ..),
+                    ) if onset.index == index => {
                         // recast input variant with same active::Onset
-                        let uninit: &mut MaybeUninit<active::Onset> = unsafe { std::mem::transmute(onset) };
-                        let mut onset = unsafe { std::mem::replace(uninit, MaybeUninit::uninit()).assume_init() };
+                        let uninit: &mut MaybeUninit<active::Onset> =
+                            unsafe { std::mem::transmute(onset) };
+                        let mut onset = unsafe {
+                            std::mem::replace(uninit, MaybeUninit::uninit()).assume_init()
+                        };
                         // i don't know either, girl
                         onset.wav.file = onset.wav.file.try_clone()?;
                         self.state = active::State::Input(active::Input::Loop(onset, len));
                     }
-                    _ => if let Some(alt) = self.generate_alt(index) {
-                        let Onset { wav, start, .. } = self.pads[index as usize].onsets[alt as usize]
-                            .as_ref()
-                            .unwrap();
-                        let wav = active::Wav::open(wav)?;
-                        let onset = active::Onset { index, wav, start: *start };
-                        self.state = active::State::Input(active::Input::Loop(onset, len));
+                    _ => {
+                        if let Some(alt) = self.generate_alt(index) {
+                            let Onset { wav, start, .. } = self.pads[index as usize].onsets
+                                [alt as usize]
+                                .as_ref()
+                                .unwrap();
+                            let wav = active::Wav::open(wav)?;
+                            let onset = active::Onset {
+                                index,
+                                pan: self.generate_pan(index),
+                                wav,
+                                start: *start,
+                            };
+                            self.state = active::State::Input(active::Input::Loop(onset, len));
+                        }
                     }
                 }
             }
@@ -539,6 +592,7 @@ impl Pads {
         wav.seek(onset.start as i64)?;
         let active = active::Onset {
             index,
+            pan: self.generate_pan(index),
             wav,
             start: onset.start,
         };

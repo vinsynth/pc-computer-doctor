@@ -25,7 +25,7 @@ macro_rules! down {
 }
 
 pub enum Cmd {
-    None,
+    Clock,
     Global(Global),
     Alt(bool),
     Pad(u8, bool),
@@ -68,6 +68,7 @@ pub struct Tui {
     exit: bool,
     pads: [Pad; PAD_COUNT],
     alt: bool,
+    clock: bool,
     recording: bool,
     bias: u8,
     roll: u8,
@@ -80,7 +81,8 @@ impl Tui {
     pub fn run(
         &mut self,
         terminal: &mut DefaultTerminal,
-        rx: std::sync::mpsc::Receiver<Cmd>,
+        input_rx: std::sync::mpsc::Receiver<Cmd>,
+        audio_rx: std::sync::mpsc::Receiver<Cmd>,
     ) -> Result<()> {
         terminal.draw(|frame| self.draw(frame))?;
         while !self.exit {
@@ -89,7 +91,15 @@ impl Tui {
                 self.handle_kbd()?;
                 flush = true;
             }
-            match rx.try_recv() {
+            match input_rx.try_recv() {
+                Ok(cmd) => {
+                    self.handle_cmd(cmd);
+                    flush = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => (),
+                Err(e) => Err(e)?,
+            }
+            match audio_rx.try_recv() {
                 Ok(cmd) => {
                     self.handle_cmd(cmd);
                     flush = true;
@@ -113,7 +123,7 @@ impl Tui {
 
     fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::None => self.state = State::None,
+            Cmd::Clock => self.clock = !self.clock,
             Cmd::Global(global) => match global {
                 Global::Bias(value) => self.bias = value,
                 Global::Roll(value) => self.roll = value,
@@ -354,9 +364,20 @@ impl Tui {
 
 impl Widget for &Tui {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let [area] = Layout::vertical(vec![Constraint::Max(FILE_COUNT as u16 + 2)])
+        let [area] = Layout::vertical(vec![Constraint::Max(FILE_COUNT as u16 + 4)])
             .flex(Flex::Center)
             .areas(area);
+        let [clock_area, area] = Layout::vertical(vec![Constraint::Max(2), Constraint::Max(FILE_COUNT as u16 + 2)])
+            .flex(Flex::Center)
+            .areas(area);
+        let [left, right] = Layout::horizontal(vec![Constraint::Max(11), Constraint::Max(11)]).flex(Flex::Center).areas(clock_area);
+        if self.clock {
+            Block::new().reversed().render(left, buf);
+            Block::new().render(right, buf);
+        } else {
+            Block::new().render(left, buf);
+            Block::new().reversed().render(right, buf);
+        }
         match &self.state {
             State::None => self.render_state_none(area, buf),
             State::Dir(paths) => self.render_state_dir(paths, area, buf),
