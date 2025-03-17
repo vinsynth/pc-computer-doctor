@@ -73,6 +73,7 @@ impl<const N: usize> Pads<N> {
 
 pub struct PadsHandler<const N: usize> {
     clock: u8,
+    quant: bool,
     state: active::State,
     input: Option<Event>,
     phrase: Option<active::Phrase>,
@@ -98,7 +99,6 @@ impl<const N: usize> PadsHandler<N> {
         T: SizedSample + FromSample<f32>,
     {
         let speed = tempo * STEP_DIV as f32 / onset.wav.tempo;
-        // TODO: tempo sync via resampling OR jump on beat
         let rem = (GRAIN_LEN as f32 * 2. * speed) as usize & !1;
         let mut read = vec![0u8; rem + 2];
         let mut slice = &mut read[..];
@@ -119,15 +119,20 @@ impl<const N: usize> PadsHandler<N> {
             let read_idx = i as f32 * speed;
             let mut i16_buffer = [0u8; 2];
 
-            i16_buffer.copy_from_slice(&read[read_idx as usize * 2..][0..2]);
-            let word_a = i16::from_le_bytes(i16_buffer) as f32 / i16::MAX as f32 * read_idx.fract();
-            i16_buffer.copy_from_slice(&read[read_idx as usize * 2..][2..4]);
-            let word_b = i16::from_le_bytes(i16_buffer) as f32 / i16::MAX as f32 * (1. - read_idx.fract());
-
             // TODO: support alternative channel counts?
             assert!(channels == 2);
+            // handle float shenanigans(?)
+            let sample = if read_idx as usize * 2  + 4 < read.len() {
+                i16_buffer.copy_from_slice(&read[read_idx as usize * 2..][0..2]);
+                let word_a = i16::from_le_bytes(i16_buffer) as f32 / i16::MAX as f32 * read_idx.fract();
+                i16_buffer.copy_from_slice(&read[read_idx as usize * 2..][2..4]);
+                let word_b = i16::from_le_bytes(i16_buffer) as f32 / i16::MAX as f32 * (1. - read_idx.fract());
+                word_a + word_b
+            } else {
+                i16_buffer.copy_from_slice(&read[read_idx as usize * 2..][0..2]);
+                i16::from_le_bytes(i16_buffer) as f32 / i16::MAX as f32
+            };
 
-            let sample = word_a + word_b;
             let l = sample * (1. + width * ((onset.pan - 0.5).abs() - 1.));
             let r = sample * (1. + width * ((onset.pan + 0.5).abs() - 1.));
             buffer[i * channels] = T::from_sample(l);
@@ -146,29 +151,29 @@ impl<const N: usize> PadsHandler<N> {
     where
         T: SizedSample + FromSample<f32>,
     {
-        match event {
-            active::Event::Sync => {
-                for _ in 0..GRAIN_LEN {
-                    buffer.fill(T::EQUILIBRIUM);
-                }
-                Ok(())
-            }
-            active::Event::Hold(onset) => Self::read_grain(tempo, width, onset, buffer, channels),
-            active::Event::Loop(onset, len) => {
+        if tempo > 0. {
+            if let active::Event::Hold(onset) = event {
+                return Self::read_grain(tempo, width, onset, buffer, channels);
+            } else if let active::Event::Loop(onset, len) = event {
                 let wav = &mut onset.wav;
                 let pos = wav.pos()?;
                 let end = onset.start + (f32::from(*len) * wav.len as f32 / wav.steps as f32) as u64;
                 if end < pos || pos < onset.start && end < pos + wav.len {
                     wav.seek(onset.start as i64)?;
                 }
-                Self::read_grain(tempo, width, onset, buffer, channels)
+                return Self::read_grain(tempo, width, onset, buffer, channels);
             }
         }
+        for _ in 0..GRAIN_LEN {
+            buffer.fill(T::EQUILIBRIUM);
+        }
+        Ok(())
     }
 
     pub fn new(input_rx: std::sync::mpsc::Receiver<Cmd>) -> Self {
         Self {
             clock: 0,
+            quant: false,
             state: active::State::Input(active::Event::Sync),
             input: None,
             phrase: None,
@@ -178,7 +183,7 @@ impl<const N: usize> PadsHandler<N> {
             roll: 0.,
             drift: 0.,
             width: 1.,
-            tempo: 192.,
+            tempo: 0.,
             input_rx,
         }
     }
@@ -191,7 +196,9 @@ impl<const N: usize> PadsHandler<N> {
             match cmd {
                 Cmd::Start => self.cmd_start()?,
                 Cmd::Clock => self.cmd_clock()?,
-                Cmd::Input(event) => self.cmd_input(event),
+                Cmd::Quant(quant) => self.cmd_quant(quant)?,
+                Cmd::Input(event) => self.cmd_input(event)?,
+                Cmd::AssignTempo(tempo) => self.tempo = tempo,
                 Cmd::ClearRecord => self.cmd_clear_record(),
                 Cmd::Record(recording) => self.cmd_record(recording),
                 Cmd::AssignOnset(index, alt, onset) => self.cmd_assign_onset(index, alt, onset),
@@ -214,11 +221,8 @@ impl<const N: usize> PadsHandler<N> {
     }
 
     fn cmd_start(&mut self) -> Result<()> {
+        self.quant = true;
         self.clock = 0;
-        if let Some(input) = self.input.take() {
-            self.process_input(input)?;
-        }
-        self.advance_active()?;
         Ok(())
     }
 
@@ -231,8 +235,23 @@ impl<const N: usize> PadsHandler<N> {
         Ok(())
     }
 
-    fn cmd_input(&mut self, event: Event) {
-        self.input = Some(event);
+    fn cmd_quant(&mut self, quant: bool) -> Result<()> {
+        self.quant = quant;
+        if !quant {
+            if let Some(input) = self.input.take() {
+                self.process_input(input)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn cmd_input(&mut self, event: Event) -> Result<()> {
+        if self.quant {
+            self.input = Some(event);
+        } else {
+            self.process_input(event)?;
+        }
+        Ok(())
     }
 
     fn cmd_clear_record(&mut self) {
@@ -488,8 +507,8 @@ impl<const N: usize> PadsHandler<N> {
             let steps = self.pads.inner[index].onsets[alt as usize].as_ref().unwrap().steps;
             let onset = self.pads.onset_seek(index, alt, self.generate_pan(index))?;
             if rand::random_bool(self.roll as f64) {
-                let steps = rand::random_range(0..STEP_DIV) as u16;
-                let len = Fraction::new(rand::random_range(0..2u8.pow(N as u32)), LOOP_DIV);
+                let steps = rand::random_range(1..=STEP_DIV) as u16;
+                let len = Fraction::new(rand::random_range(1..=steps as u8 * LOOP_DIV), LOOP_DIV);
                 (active::Event::Loop(onset, len), steps)
             } else {
                 (active::Event::Hold(onset), steps)

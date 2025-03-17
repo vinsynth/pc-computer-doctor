@@ -56,6 +56,8 @@ struct Alt {
 
 pub struct InputHandler {
     clock: u8,
+    step: u16,
+    delta: Option<std::time::Instant>,
     downs: Vec<u8>,
     last_downs_len: u8,
     state: State,
@@ -75,6 +77,8 @@ impl InputHandler {
     pub fn new(tui_tx: Sender<tui::Cmd>, pads_tx: Sender<audio::Cmd>) -> Result<Self> {
         Ok(Self {
             clock: 0,
+            step: 0,
+            delta: None,
             downs: Vec::new(),
             last_downs_len: 0,
             state: State::Onset,
@@ -142,15 +146,31 @@ impl InputHandler {
             }
             LiveEvent::Realtime(midly::live::SystemRealtime::Start) => {
                 self.clock = 0;
+                self.step = 0;
                 self.pads_tx.send(audio::Cmd::Start)?;
                 self.tui_tx.send(tui::Cmd::Start)?;
             }
             LiveEvent::Realtime(midly::live::SystemRealtime::TimingClock) => {
-                self.clock = (self.clock + 1) % (audio::PPQ / audio::STEP_DIV);
                 if self.clock == 0 {
+                    let now = std::time::Instant::now();
+                    if let Some(delta) = self.delta {
+                        let ioi = now.duration_since(delta);
+                        let tempo = 60. / ioi.as_secs_f32() / audio::STEP_DIV as f32;
+                        self.pads_tx.send(audio::Cmd::AssignTempo(tempo))?;
+                    }
+                    self.delta = Some(now);
+                    self.step += 1;
                     self.pads_tx.send(audio::Cmd::Clock)?;
                     self.tui_tx.send(tui::Cmd::Clock)?;
                 }
+                self.clock = (self.clock + 1) % (audio::PPQ / audio::STEP_DIV);
+            }
+            LiveEvent::Realtime(midly::live::SystemRealtime::Stop) => {
+                self.delta = None;
+                self.clock = 0;
+                self.step = 0;
+                self.pads_tx.send(audio::Cmd::Quant(false))?;
+                self.tui_tx.send(tui::Cmd::Start)?;
             }
             _ => (),
         }
@@ -162,20 +182,13 @@ impl InputHandler {
         if down {
             self.downs.push(index);
 
-            let mut onset = false;
             match self.state {
-                State::Onset => onset = true,
-                State::Dir { .. } => {
-                    onset = true;
-                    self.state = State::Onset;
-                }
+                State::Onset => (),
+                State::Dir { .. } => self.state = State::Onset,
                 State::File { .. } => self.handle_pad_file(index)?,
-                State::Phrase => self.handle_pad_phrase(index)?,
-                State::Ghost(_) => self.handle_pad_ghost(index)?,
-                State::Sequence(_) => self.handle_pad_sequence(index)?,
-            }
-            if !onset {
-                return Ok(());
+                State::Phrase => return self.handle_pad_phrase(index),
+                State::Ghost(_) => return self.handle_pad_ghost(index),
+                State::Sequence(_) => return self.handle_pad_sequence(index),
             }
         } else {
             self.downs.retain(|&v| v != index);
@@ -387,6 +400,7 @@ impl InputHandler {
                             let rd_string = std::fs::read_to_string(path.with_extension("rd"))?;
                             let rd: audio::Rd = miniserde::json::from_str(&rd_string)?;
                             let name = path.file_stem().unwrap().to_str().unwrap().to_string();
+                            self.pads_tx.send(audio::Cmd::Quant(false))?;
                             self.tui_tx.send(tui::Cmd::File {
                                 name,
                                 index: 1,
@@ -430,6 +444,7 @@ impl InputHandler {
                 }
                 FsCmd::Into => {
                     let paths = send_fs!(path.parent().unwrap());
+                    self.pads_tx.send(audio::Cmd::Quant(true))?;
                     self.state = State::Dir {
                         paths,
                         index: *index,
@@ -441,10 +456,9 @@ impl InputHandler {
             match self.state {
                 State::Ghost(false) => self.pads_tx.send(audio::Cmd::ClearGhost)?,
                 State::Sequence(false) => self.pads_tx.send(audio::Cmd::ClearSequence)?,
-                _ => {
-                    self.state = State::Dir { paths, index: 0 };
-                }
+                _ => (),
             }
+            self.state = State::Dir { paths, index: 0 };
         }
         Ok(())
     }

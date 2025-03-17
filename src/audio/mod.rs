@@ -13,6 +13,8 @@ pub const LOOP_DIV: u8 = 8;
 pub enum Cmd {
     Start,
     Clock,
+    Quant(bool),
+    AssignTempo(f32),
     Input(Event),
     ClearRecord,
     Record(bool),
