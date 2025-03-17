@@ -199,7 +199,7 @@ impl<const N: usize> PadsHandler<N> {
                 Cmd::ClearGhost => self.cmd_clear_ghost(),
                 Cmd::PushGhost(index) => self.cmd_push_ghost(index),
                 Cmd::ClearSequence => self.cmd_clear_sequence(),
-                Cmd::PushSequence(index) => self.cmd_push_sequence(index),
+                Cmd::PushSequence(index) => self.cmd_push_sequence(index)?,
                 Cmd::AssignGlobal(global) => self.cmd_assign_global(global),
             }
         }
@@ -272,11 +272,18 @@ impl<const N: usize> PadsHandler<N> {
         for Pad { phrase_weight, .. } in self.pads.inner.iter_mut() {
             *phrase_weight = 0;
         }
+        if let Some(active::Phrase { event_rem, phrase_rem, .. }) = self.phrase.as_mut() {
+            *phrase_rem = *event_rem;
+        }
     }
 
-    fn cmd_push_sequence(&mut self, index: u8) {
+    fn cmd_push_sequence(&mut self, index: u8) -> Result<()> {
         let weight = &mut self.pads.inner[index as usize].phrase_weight;
         *weight = (*weight + 1).min(15);
+        if self.phrase.is_none() {
+            self.phrase = self.generate_phrase()?;
+        }
+        Ok(())
     }
 
     fn cmd_assign_global(&mut self, global: Global) {
@@ -516,8 +523,10 @@ impl<const N: usize> PadsHandler<N> {
 
     fn generate_phrase(&mut self) -> Result<Option<active::Phrase>> {
         let mut weights = self.pads.phrase_weights();
-        let sum = weights.iter().fold(0, |acc, v| acc + *v as u16);
-        if sum == 0 || self.pads.inner.iter().all(|v| v.phrase.is_empty()) {
+        let sum = self.pads.inner.iter().fold(0, |acc, v| {
+            acc + v.phrase_weight as u16 * !v.phrase.is_empty() as u16
+        });
+        if sum == 0 {
             return Ok(None);
         }
         let mut offset = rand::random_range(1..=sum);
