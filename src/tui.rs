@@ -25,6 +25,8 @@ macro_rules! down {
 }
 
 pub enum Cmd {
+    Clear,
+    Start,
     Clock,
     Global(Global),
     Alt(bool),
@@ -82,7 +84,6 @@ impl Tui {
         &mut self,
         terminal: &mut DefaultTerminal,
         input_rx: std::sync::mpsc::Receiver<Cmd>,
-        audio_rx: std::sync::mpsc::Receiver<Cmd>,
     ) -> Result<()> {
         terminal.draw(|frame| self.draw(frame))?;
         while !self.exit {
@@ -92,14 +93,6 @@ impl Tui {
                 flush = true;
             }
             match input_rx.try_recv() {
-                Ok(cmd) => {
-                    self.handle_cmd(cmd);
-                    flush = true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => (),
-                Err(e) => Err(e)?,
-            }
-            match audio_rx.try_recv() {
                 Ok(cmd) => {
                     self.handle_cmd(cmd);
                     flush = true;
@@ -123,6 +116,8 @@ impl Tui {
 
     fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
+            Cmd::Clear => self.state = State::None,
+            Cmd::Start => self.clock = false,
             Cmd::Clock => self.clock = !self.clock,
             Cmd::Global(global) => match global {
                 Global::Bias(value) => self.bias = value,
@@ -372,11 +367,11 @@ impl Widget for &Tui {
             .areas(area);
         let [left, right] = Layout::horizontal(vec![Constraint::Max(11), Constraint::Max(11)]).flex(Flex::Center).areas(clock_area);
         if self.clock {
-            Block::new().reversed().render(left, buf);
-            Block::new().render(right, buf);
-        } else {
             Block::new().render(left, buf);
             Block::new().reversed().render(right, buf);
+        } else {
+            Block::new().reversed().render(left, buf);
+            Block::new().render(right, buf);
         }
         match &self.state {
             State::None => self.render_state_none(area, buf),

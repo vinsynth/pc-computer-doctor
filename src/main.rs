@@ -1,9 +1,6 @@
 mod audio;
-use audio::*;
 mod input;
-use input::*;
 mod tui;
-use tui::*;
 
 use std::io::Write;
 
@@ -12,23 +9,12 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     FromSample, SizedSample,
 };
-use ringbuf::{
-    traits::{Consumer, Producer, Split},
-    HeapRb,
-};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
 
     let (input_tui_tx, input_tui_rx) = std::sync::mpsc::channel::<tui::Cmd>();
-    let (input_audio_tx, input_audio_rx) = std::sync::mpsc::channel::<audio::Cmd>();
-    let (audio_tui_tx, audio_tui_rx) = std::sync::mpsc::channel::<tui::Cmd>();
-
-    let ring = HeapRb::<[f32; 2]>::new(GRAIN_LEN * 2);
-    let (mut producer, consumer) = ring.split();
-    for _ in 0..GRAIN_LEN {
-        producer.try_push([0., 0.]).unwrap();
-    }
+    let (input_pads_tx, input_pads_rx) = std::sync::mpsc::channel::<audio::Cmd>();
 
     let hosts = cpal::available_hosts();
     let id = match hosts.len() {
@@ -104,12 +90,12 @@ fn main() -> Result<()> {
                 .ok_or(color_eyre::Report::msg("invalid input port selected"))?
         }
     };
-    let input_handler = InputHandler::new(input_tui_tx, input_audio_tx)?;
+    let input_handler = input::InputHandler::new(input_tui_tx, input_pads_tx)?;
     let midi_in = midi_in
         .connect(
             in_port,
             "angry-surgeon",
-            move |_, message, input_handler: &mut InputHandler| {
+            move |_, message, input_handler: &mut input::InputHandler| {
                 input_handler.push(message).unwrap();
             },
             input_handler,
@@ -119,24 +105,20 @@ fn main() -> Result<()> {
     println!("\nplease make some noise <3");
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
-    let pads_handle = std::thread::spawn(move || -> Result<()> {
-        audio::Pads::new(audio_tui_tx).run(input_audio_rx, producer)?;
-        Ok(())
-    });
-
     let audio_handle = std::thread::spawn(move || -> Result<()> {
         let config = device.default_output_config().unwrap();
+        let pads = audio::pads::PadsHandler::<{audio::PAD_COUNT}>::new(input_pads_rx);
 
         match config.sample_format() {
-            cpal::SampleFormat::I16 => play::<i16>(&device, &config.into(), consumer)?,
-            cpal::SampleFormat::F32 => play::<f32>(&device, &config.into(), consumer)?,
+            cpal::SampleFormat::I16 => play::<i16>(&device, &config.into(), pads)?,
+            cpal::SampleFormat::F32 => play::<f32>(&device, &config.into(), pads)?,
             sample_format => panic!("unsupported sample format: {}", sample_format),
         }
         Ok(())
     });
 
     let mut terminal = ratatui::init();
-    Tui::default().run(&mut terminal, input_tui_rx, audio_tui_rx)?;
+    tui::Tui::default().run(&mut terminal, input_tui_rx)?;
     ratatui::restore();
 
     // pads thread completes once audio_tx held by input_handler dropped in _in_connection thread
@@ -144,7 +126,6 @@ fn main() -> Result<()> {
 
     audio_handle.thread().unpark();
     audio_handle.join().unwrap()?;
-    pads_handle.join().unwrap()?;
 
     Ok(())
 }
@@ -152,7 +133,7 @@ fn main() -> Result<()> {
 fn play<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    mut consumer: ringbuf::CachingCons<std::sync::Arc<HeapRb<[f32; 2]>>>,
+    mut pads: audio::pads::PadsHandler<{audio::PAD_COUNT}>,
 ) -> Result<()>
 where
     T: SizedSample + FromSample<f32>,
@@ -160,13 +141,7 @@ where
     let channels = config.channels as usize;
 
     let out_fn = move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-        for frame in data.chunks_mut(channels) {
-            let value = match consumer.try_pop() {
-                Some([l, r]) => [T::from_sample(l), T::from_sample(r)],
-                None => [T::from_sample(0.); 2],
-            };
-            frame.copy_from_slice(&value[..]);
-        }
+        pads.tick(data, channels).unwrap();
     };
     let err_fn = |err| eprintln!("error occurred on stream: {}", err);
     let stream = device.build_output_stream(config, out_fn, err_fn, None)?;

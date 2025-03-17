@@ -6,21 +6,12 @@ use std::{
 
 pub struct Wav {
     pub tempo: f32,
-    pub steps: usize,
+    pub steps: u16,
     pub file: File,
     pub len: u64,
 }
 
 impl Wav {
-    pub fn open(wav: &super::Wav) -> Result<Self, std::io::Error> {
-        Ok(Self {
-            tempo: wav.rd.tempo,
-            steps: wav.rd.steps,
-            file: File::open(wav.path.clone())?,
-            len: wav.len,
-        })
-    }
-
     pub fn pos(&mut self) -> Result<u64, std::io::Error> {
         Ok(self.file.stream_position()? - 44)
     }
@@ -30,11 +21,6 @@ impl Wav {
             44 + (offset.rem_euclid(self.len as i64) as u64),
         ))?;
         Ok(())
-    }
-
-    pub fn seek_quantized(&mut self, offset: i64, step: f32) -> Result<(), std::io::Error> {
-        let shift = ((step - 0.5) / self.steps as f32 * self.len as f32) as i64 & !1;
-        self.seek(offset + shift)
     }
 }
 
@@ -46,21 +32,21 @@ pub struct Onset {
     pub start: u64,
 }
 
-pub enum Input {
+pub enum Event {
     Sync,
     Hold(Onset),
     Loop(Onset, Fraction),
 }
 
 pub enum State {
-    Input(Input),
-    Ghost(Input, f32),
+    Input(Event),
+    Ghost(Event, u16),
     Phrase,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State::Input(Input::Sync)
+        State::Input(Event::Sync)
     }
 }
 
@@ -69,10 +55,12 @@ pub struct Phrase {
     pub index: u8,
     /// next event index
     pub next: usize,
-    /// remaining step duration
-    pub rem: f32,
-    /// active input, in any
-    pub input: Option<Input>,
+    /// remaining steps in event
+    pub event_rem: u16,
+    /// remaining steps in phrase
+    pub phrase_rem: u16,
+    /// active event, if any
+    pub event: Option<Event>,
 }
 
 #[derive(Default)]

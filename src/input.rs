@@ -55,13 +55,14 @@ struct Alt {
 }
 
 pub struct InputHandler {
-    tui_tx: Sender<tui::Cmd>,
-    audio_tx: Sender<audio::Cmd>,
+    clock: u8,
     downs: Vec<u8>,
     last_downs_len: u8,
     state: State,
     recording: bool,
     alt: Alt,
+    pads_tx: Sender<audio::Cmd>,
+    tui_tx: Sender<tui::Cmd>,
 }
 
 enum FsCmd {
@@ -71,10 +72,9 @@ enum FsCmd {
 }
 
 impl InputHandler {
-    pub fn new(tui_tx: Sender<tui::Cmd>, audio_tx: Sender<audio::Cmd>) -> Result<Self> {
+    pub fn new(tui_tx: Sender<tui::Cmd>, pads_tx: Sender<audio::Cmd>) -> Result<Self> {
         Ok(Self {
-            tui_tx,
-            audio_tx,
+            clock: 0,
             downs: Vec::new(),
             last_downs_len: 0,
             state: State::Onset,
@@ -83,6 +83,8 @@ impl InputHandler {
                 logic: false,
                 input: false,
             },
+            pads_tx,
+            tui_tx,
         })
     }
 
@@ -138,8 +140,17 @@ impl InputHandler {
                 }
                 self.handle_alt_logic()?;
             }
+            LiveEvent::Realtime(midly::live::SystemRealtime::Start) => {
+                self.clock = 0;
+                self.pads_tx.send(audio::Cmd::Start)?;
+                self.tui_tx.send(tui::Cmd::Start)?;
+            }
             LiveEvent::Realtime(midly::live::SystemRealtime::TimingClock) => {
-                todo!("tempo sync")
+                self.clock = (self.clock + 1) % (audio::PPQ / audio::STEP_DIV);
+                if self.clock == 0 {
+                    self.pads_tx.send(audio::Cmd::Clock)?;
+                    self.tui_tx.send(tui::Cmd::Clock)?;
+                }
             }
             _ => (),
         }
@@ -177,7 +188,7 @@ impl InputHandler {
     }
 
     fn handle_pad_input(&mut self) -> Result<()> {
-        let mut input = audio::Input::Sync;
+        let mut input = audio::Event::Sync;
         if let Some(&index) = self.downs.first() {
             if self.downs.len() > 1 {
                 // init loop start
@@ -190,20 +201,21 @@ impl InputHandler {
                             .unwrap_or(v + PAD_COUNT as u8 - 1 - index)
                     })
                     .fold(0u8, |acc, v| acc | (1 << v));
-                let len = audio::Fraction::new(numerator, audio::STEP_DIVISOR);
-                input = audio::Input::Loop { index, len };
+                let len = audio::Fraction::new(numerator, audio::LOOP_DIV);
+                input = audio::Event::Loop { index, len };
             } else if self.last_downs_len > 1 {
                 // init loop stop
+                input = audio::Event::Hold { index };
             } else {
                 // init jump
-                input = audio::Input::Hold { index };
+                input = audio::Event::Hold { index };
             }
         } else {
             // init sync
         }
         self.last_downs_len = self.downs.len() as u8;
 
-        self.audio_tx.send(audio::Cmd::Input(input))?;
+        self.pads_tx.send(audio::Cmd::Input(input))?;
         Ok(())
     }
 
@@ -218,31 +230,31 @@ impl InputHandler {
             let len = std::fs::metadata(path)?.len() - 44;
             let start = rd.onsets[*onset];
             let end = rd.onsets.get(*onset + 1).copied().unwrap_or(len);
-            let steps = ((end - start) as f32 * rd.steps as f32 / len as f32).round() as usize;
+            let steps = ((end - start) as f32 * rd.steps as f32 / len as f32).round() as u16;
             let wav = audio::Wav {
                 rd: rd.clone(),
                 path: path.clone(),
                 len,
             };
             let onset = audio::Onset { wav, start, steps };
-            self.audio_tx
+            self.pads_tx
                 .send(audio::Cmd::AssignOnset(index, self.alt.logic, onset))?;
         }
         Ok(())
     }
 
     fn handle_pad_phrase(&mut self, index: u8) -> Result<()> {
-        self.audio_tx.send(audio::Cmd::AssignPhrase(index))?;
+        self.pads_tx.send(audio::Cmd::AssignPhrase(index))?;
         Ok(())
     }
 
     fn handle_pad_ghost(&mut self, index: u8) -> Result<()> {
         if let State::Ghost(ref mut cleared) = self.state {
             if !*cleared {
-                self.audio_tx.send(audio::Cmd::ClearGhost)?;
+                self.pads_tx.send(audio::Cmd::ClearGhost)?;
                 *cleared = true;
             }
-            self.audio_tx.send(audio::Cmd::PushGhost(index))?;
+            self.pads_tx.send(audio::Cmd::PushGhost(index))?;
         }
         Ok(())
     }
@@ -250,23 +262,20 @@ impl InputHandler {
     fn handle_pad_sequence(&mut self, index: u8) -> Result<()> {
         if let State::Sequence(ref mut cleared) = self.state {
             if !*cleared {
-                self.audio_tx.send(audio::Cmd::ClearSequence)?;
+                self.pads_tx.send(audio::Cmd::ClearSequence)?;
                 *cleared = true;
             }
-            self.audio_tx.send(audio::Cmd::PushSequence(index))?;
+            self.pads_tx.send(audio::Cmd::PushSequence(index))?;
         }
         Ok(())
     }
 
     fn handle_ghost_event(&mut self, down: bool) -> Result<()> {
         if down {
-            if let State::Sequence(false) = self.state {
-                self.audio_tx.send(audio::Cmd::ClearSequence)?;
-            }
             self.state = State::Ghost(false);
         } else {
             if let State::Ghost(false) = self.state {
-                self.audio_tx.send(audio::Cmd::ClearGhost)?;
+                self.pads_tx.send(audio::Cmd::ClearGhost)?;
             }
             self.state = State::Onset;
         }
@@ -277,12 +286,12 @@ impl InputHandler {
     fn handle_sequence_event(&mut self, down: bool) -> Result<()> {
         if down {
             if let State::Ghost(false) = self.state {
-                self.audio_tx.send(audio::Cmd::ClearGhost)?;
+                self.pads_tx.send(audio::Cmd::ClearGhost)?;
             }
             self.state = State::Sequence(false);
         } else {
             if let State::Sequence(false) = self.state {
-                self.audio_tx.send(audio::Cmd::ClearSequence)?;
+                self.pads_tx.send(audio::Cmd::ClearSequence)?;
             }
             self.state = State::Onset;
         }
@@ -291,14 +300,23 @@ impl InputHandler {
     }
 
     fn handle_record_event(&mut self) -> Result<()> {
-        self.recording = !self.recording;
-        if self.recording {
-            self.tui_tx.send(tui::Cmd::Record)?;
-        } else {
+        if matches!(self.state, State::Phrase) {
+            self.clear_record()?;
+            self.state = State::Onset;
+        } else if self.recording {
+            // start phrase assignment
+            self.recording = false;
             self.state = State::Phrase;
+            self.pads_tx.send(audio::Cmd::Record(false))?;
             self.tui_tx.send(tui::Cmd::Phrase)?;
+        } else {
+            // start record
+            self.recording = true;
+            self.state = State::Onset;
+            self.pads_tx.send(audio::Cmd::Record(true))?;
+            self.tui_tx.send(tui::Cmd::Clear)?;
+            self.tui_tx.send(tui::Cmd::Record)?;
         }
-        self.audio_tx.send(audio::Cmd::Record(self.recording))?;
         Ok(())
     }
 
@@ -421,8 +439,8 @@ impl InputHandler {
         } else {
             let paths = send_fs!("assets");
             match self.state {
-                State::Ghost(false) => self.audio_tx.send(audio::Cmd::ClearGhost)?,
-                State::Sequence(false) => self.audio_tx.send(audio::Cmd::ClearSequence)?,
+                State::Ghost(false) => self.pads_tx.send(audio::Cmd::ClearGhost)?,
+                State::Sequence(false) => self.pads_tx.send(audio::Cmd::ClearSequence)?,
                 _ => {
                     self.state = State::Dir { paths, index: 0 };
                 }
@@ -449,8 +467,14 @@ impl InputHandler {
     }
 
     fn handle_global_event(&mut self, global: Global) -> Result<()> {
-        self.audio_tx.send(audio::Cmd::AssignGlobal(global))?;
+        self.pads_tx.send(audio::Cmd::AssignGlobal(global))?;
         self.tui_tx.send(tui::Cmd::Global(global))?;
+        Ok(())
+    }
+
+    fn clear_record(&mut self) -> Result<()> {
+        self.pads_tx.send(audio::Cmd::ClearRecord)?;
+        self.tui_tx.send(tui::Cmd::Clear)?;
         Ok(())
     }
 }
