@@ -12,8 +12,10 @@ const KEY_ALT: u8 = 60;
 const KEY_FS_INC: u8 = 61;
 const KEY_GHOST: u8 = 62;
 const KEY_FS_INTO: u8 = 63;
-const KEY_RECORD: u8 = 64;
+const KEY_HOLD: u8 = 64;
 const PAD_OFFSET: u8 = 65;
+
+const CTRL_SPEED: u8 = 102;
 const CTRL_BIAS: u8 = 105;
 const CTRL_ROLL: u8 = 106;
 const CTRL_DRIFT: u8 = 29;
@@ -44,9 +46,7 @@ enum State {
         rd: audio::Rd,
         onset: usize,
     },
-    Phrase,
     Ghost(bool),
-    Sequence(bool),
 }
 
 struct Alt {
@@ -61,7 +61,7 @@ pub struct InputHandler {
     downs: Vec<u8>,
     last_downs_len: u8,
     state: State,
-    recording: bool,
+    hold: bool,
     alt: Alt,
     pads_tx: Sender<audio::Cmd>,
     tui_tx: Sender<tui::Cmd>,
@@ -82,7 +82,7 @@ impl InputHandler {
             downs: Vec::new(),
             last_downs_len: 0,
             state: State::Onset,
-            recording: false,
+            hold: false,
             alt: Alt {
                 logic: false,
                 input: false,
@@ -96,21 +96,10 @@ impl InputHandler {
         match LiveEvent::parse(message)? {
             LiveEvent::Midi { message, .. } => {
                 match message {
-                    MidiMessage::Controller { controller, value } => match controller.as_int() {
-                        CTRL_BIAS => self.handle_global_event(Global::Bias(value.as_int()))?,
-                        CTRL_ROLL => self.handle_global_event(Global::Roll(value.as_int()))?,
-                        CTRL_DRIFT => self.handle_global_event(Global::Drift(value.as_int()))?,
-                        CTRL_WIDTH => self.handle_global_event(Global::Width(value.as_int()))?,
-                        _ => (),
-                    },
                     MidiMessage::NoteOff { key, .. } => match key.as_int() {
                         KEY_ALT => self.handle_alt_input(false),
                         KEY_GHOST => {
-                            if self.alt.logic {
-                                self.handle_sequence_event(false)?
-                            } else {
-                                self.handle_ghost_event(false)?
-                            }
+                            self.handle_ghost_event(false)?
                         }
                         key if (PAD_OFFSET..PAD_OFFSET + PAD_COUNT as u8).contains(&key) => {
                             self.handle_pad_event(key - PAD_OFFSET, false)?;
@@ -128,23 +117,31 @@ impl InputHandler {
                         }
                         KEY_FS_INTO => self.handle_fs_event(FsCmd::Into)?,
                         KEY_GHOST => {
-                            if self.alt.logic {
-                                self.handle_sequence_event(true)?
-                            } else {
-                                self.handle_ghost_event(true)?
-                            }
+                            self.handle_ghost_event(true)?
                         }
-                        KEY_RECORD => self.handle_record_event()?,
+                        KEY_HOLD  => self.handle_hold_event()?,
                         key if (PAD_OFFSET..PAD_OFFSET + PAD_COUNT as u8).contains(&key) => {
                             self.handle_pad_event(key - PAD_OFFSET, true)?;
                         }
                         _ => (),
+                    },
+                    MidiMessage::Controller { controller, value } => match controller.as_int() {
+                        CTRL_SPEED => self.pads_tx.send(audio::Cmd::AssignSpeed(value.as_int() as f32 / 127. * 2.))?,
+                        CTRL_BIAS => self.handle_global_event(Global::Bias(value.as_int()))?,
+                        CTRL_ROLL => self.handle_global_event(Global::Roll(value.as_int()))?,
+                        CTRL_DRIFT => self.handle_global_event(Global::Drift(value.as_int()))?,
+                        CTRL_WIDTH => self.handle_global_event(Global::Width(value.as_int()))?,
+                        _ => (),
+                    },
+                    MidiMessage::PitchBend { bend } => {
+                        self.pads_tx.send(audio::Cmd::OffsetSpeed(bend.as_f32() + 1.))?;
                     },
                     _ => (),
                 }
                 self.handle_alt_logic()?;
             }
             LiveEvent::Realtime(midly::live::SystemRealtime::Start) => {
+                self.delta = None;
                 self.clock = 0;
                 self.step = 0;
                 self.pads_tx.send(audio::Cmd::Start)?;
@@ -169,7 +166,7 @@ impl InputHandler {
                 self.delta = None;
                 self.clock = 0;
                 self.step = 0;
-                self.pads_tx.send(audio::Cmd::Quant(false))?;
+                self.pads_tx.send(audio::Cmd::Stop)?;
                 self.tui_tx.send(tui::Cmd::Start)?;
             }
             _ => (),
@@ -185,23 +182,21 @@ impl InputHandler {
             match self.state {
                 State::Onset => (),
                 State::Dir { .. } => self.state = State::Onset,
-                State::File { .. } => self.handle_pad_file(index)?,
-                State::Phrase => return self.handle_pad_phrase(index),
+                State::File { .. } => return self.handle_pad_file(index),
                 State::Ghost(_) => return self.handle_pad_ghost(index),
-                State::Sequence(_) => return self.handle_pad_sequence(index),
             }
         } else {
             self.downs.retain(|&v| v != index);
-
-            if matches!(self.state, State::Phrase) {
-                self.state = State::Onset;
-            }
         }
-        self.handle_pad_input()
+        if !self.hold || down {
+            self.handle_pad_input()?;
+        }
+        self.last_downs_len = self.downs.len() as u8;
+        Ok(())
     }
 
     fn handle_pad_input(&mut self) -> Result<()> {
-        let mut input = audio::Event::Sync;
+        // let mut input = audio::Event::Sync;
         if let Some(&index) = self.downs.first() {
             if self.downs.len() > 1 {
                 // init loop start
@@ -215,20 +210,18 @@ impl InputHandler {
                     })
                     .fold(0u8, |acc, v| acc | (1 << v));
                 let len = audio::Fraction::new(numerator, audio::LOOP_DIV);
-                input = audio::Event::Loop { index, len };
+                self.pads_tx.send(audio::Cmd::Input(audio::Event::Loop { index, len }))?;
             } else if self.last_downs_len > 1 {
                 // init loop stop
-                input = audio::Event::Hold { index };
+                self.pads_tx.send(audio::Cmd::Input(audio::Event::Hold { index }))?;
             } else {
                 // init jump
-                input = audio::Event::Hold { index };
+                self.pads_tx.send(audio::Cmd::Input(audio::Event::Hold { index }))?;
             }
         } else {
             // init sync
+            self.pads_tx.send(audio::Cmd::Input(audio::Event::Sync))?;
         }
-        self.last_downs_len = self.downs.len() as u8;
-
-        self.pads_tx.send(audio::Cmd::Input(input))?;
         Ok(())
     }
 
@@ -256,11 +249,6 @@ impl InputHandler {
         Ok(())
     }
 
-    fn handle_pad_phrase(&mut self, index: u8) -> Result<()> {
-        self.pads_tx.send(audio::Cmd::AssignPhrase(index))?;
-        Ok(())
-    }
-
     fn handle_pad_ghost(&mut self, index: u8) -> Result<()> {
         if let State::Ghost(ref mut cleared) = self.state {
             if !*cleared {
@@ -268,17 +256,6 @@ impl InputHandler {
                 *cleared = true;
             }
             self.pads_tx.send(audio::Cmd::PushGhost(index))?;
-        }
-        Ok(())
-    }
-
-    fn handle_pad_sequence(&mut self, index: u8) -> Result<()> {
-        if let State::Sequence(ref mut cleared) = self.state {
-            if !*cleared {
-                self.pads_tx.send(audio::Cmd::ClearSequence)?;
-                *cleared = true;
-            }
-            self.pads_tx.send(audio::Cmd::PushSequence(index))?;
         }
         Ok(())
     }
@@ -296,53 +273,24 @@ impl InputHandler {
         Ok(())
     }
 
-    fn handle_sequence_event(&mut self, down: bool) -> Result<()> {
-        if down {
-            if let State::Ghost(false) = self.state {
-                self.pads_tx.send(audio::Cmd::ClearGhost)?;
-            }
-            self.state = State::Sequence(false);
-        } else {
-            if let State::Sequence(false) = self.state {
-                self.pads_tx.send(audio::Cmd::ClearSequence)?;
-            }
-            self.state = State::Onset;
-        }
-        self.tui_tx.send(tui::Cmd::Sequence(down))?;
-        Ok(())
-    }
-
-    fn handle_record_event(&mut self) -> Result<()> {
-        if matches!(self.state, State::Phrase) {
-            self.clear_record()?;
-            self.state = State::Onset;
-        } else if self.recording {
-            // start phrase assignment
-            self.recording = false;
-            self.state = State::Phrase;
-            self.pads_tx.send(audio::Cmd::Record(false))?;
-            self.tui_tx.send(tui::Cmd::Phrase)?;
-        } else {
-            // start record
-            self.recording = true;
-            self.state = State::Onset;
-            self.pads_tx.send(audio::Cmd::Record(true))?;
-            self.tui_tx.send(tui::Cmd::Clear)?;
-            self.tui_tx.send(tui::Cmd::Record)?;
+    fn handle_hold_event(&mut self) -> Result<()> {
+        self.hold = !self.hold;
+        if !self.hold {
+            self.handle_pad_input()?;
         }
         Ok(())
     }
 
     fn handle_fs_event(&mut self, cmd: FsCmd) -> Result<()> {
         macro_rules! send_fs {
-            ($dir:expr) => {{
+            ($dir:expr,$index:expr) => {{
                 // eprintln!("FIXME: check both rd and wav exist, or handle when wav only");
                 let mut paths = std::fs::read_dir($dir)?
                     .flat_map(|v| Some(v.ok()?.path().into_boxed_path()))
                     .filter(|v| v.extension().unwrap() == "wav" || v.is_dir())
                     .collect::<Vec<_>>();
                 paths.sort();
-                resend_fs!(paths, 0);
+                resend_fs!(paths, $index);
                 paths
             }};
         }
@@ -353,8 +301,7 @@ impl InputHandler {
                 } else {
                     let mut strings = [const { String::new() }; tui::FILE_COUNT];
                     for i in 0..tui::FILE_COUNT {
-                        let index = (($index as isize + i as isize - tui::FILE_COUNT as isize / 2)
-                            % $paths.len() as isize) as usize;
+                        let index = ($index as isize + i as isize - tui::FILE_COUNT as isize / 2).rem_euclid($paths.len() as isize) as usize;
                         strings[i] = $paths[index]
                             .file_stem()
                             .unwrap()
@@ -374,11 +321,11 @@ impl InputHandler {
         {
             match cmd {
                 FsCmd::Dec => {
-                    *index = ((*index as isize - 1) % paths.len() as isize) as usize;
+                    *index = (*index as isize - 1).rem_euclid(paths.len() as isize) as usize;
                     resend_fs!(paths, *index);
                 }
                 FsCmd::Inc => {
-                    *index = ((*index as isize + 1) % paths.len() as isize) as usize;
+                    *index = (*index as isize + 1).rem_euclid(paths.len() as isize) as usize;
                     resend_fs!(paths, *index);
                 }
                 FsCmd::Into => {
@@ -393,14 +340,13 @@ impl InputHandler {
                                 // in subdirectory; include ".."
                                 vec![path.parent().unwrap().into()]
                             };
-                            paths.extend(send_fs!(path));
+                            paths.extend(send_fs!(path, 0));
                             *index = 0;
                         } else {
                             // into audio file
                             let rd_string = std::fs::read_to_string(path.with_extension("rd"))?;
                             let rd: audio::Rd = miniserde::json::from_str(&rd_string)?;
                             let name = path.file_stem().unwrap().to_str().unwrap().to_string();
-                            self.pads_tx.send(audio::Cmd::Quant(false))?;
                             self.tui_tx.send(tui::Cmd::File {
                                 name,
                                 index: 1,
@@ -434,7 +380,7 @@ impl InputHandler {
                     })?;
                 }
                 FsCmd::Inc => {
-                    *onset = (*onset + 1) % rd.onsets.len();
+                    *onset = (*onset + 1).rem_euclid(rd.onsets.len());
                     let name = path.file_stem().unwrap().to_str().unwrap().to_string();
                     self.tui_tx.send(tui::Cmd::File {
                         name,
@@ -443,8 +389,7 @@ impl InputHandler {
                     })?;
                 }
                 FsCmd::Into => {
-                    let paths = send_fs!(path.parent().unwrap());
-                    self.pads_tx.send(audio::Cmd::Quant(true))?;
+                    let paths = send_fs!(path.parent().unwrap(), *index);
                     self.state = State::Dir {
                         paths,
                         index: *index,
@@ -452,11 +397,9 @@ impl InputHandler {
                 }
             }
         } else {
-            let paths = send_fs!("assets");
-            match self.state {
-                State::Ghost(false) => self.pads_tx.send(audio::Cmd::ClearGhost)?,
-                State::Sequence(false) => self.pads_tx.send(audio::Cmd::ClearSequence)?,
-                _ => (),
+            let paths = send_fs!("assets", 0);
+            if let State::Ghost(false) = self.state {
+                self.pads_tx.send(audio::Cmd::ClearGhost)?;
             }
             self.state = State::Dir { paths, index: 0 };
         }
@@ -465,7 +408,7 @@ impl InputHandler {
 
     fn handle_alt_logic(&mut self) -> Result<()> {
         match self.state {
-            State::Ghost(..) | State::Sequence(..) => (),
+            State::Ghost(..) => (),
             _ => {
                 if self.alt.logic != self.alt.input {
                     self.alt.logic = self.alt.input;
@@ -483,12 +426,6 @@ impl InputHandler {
     fn handle_global_event(&mut self, global: Global) -> Result<()> {
         self.pads_tx.send(audio::Cmd::AssignGlobal(global))?;
         self.tui_tx.send(tui::Cmd::Global(global))?;
-        Ok(())
-    }
-
-    fn clear_record(&mut self) -> Result<()> {
-        self.pads_tx.send(audio::Cmd::ClearRecord)?;
-        self.tui_tx.send(tui::Cmd::Clear)?;
         Ok(())
     }
 }

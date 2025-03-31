@@ -13,17 +13,14 @@ pub const LOOP_DIV: u8 = 8;
 pub enum Cmd {
     Start,
     Clock,
-    Quant(bool),
+    Stop,
     AssignTempo(f32),
+    AssignSpeed(f32),
+    OffsetSpeed(f32),
     Input(Event),
-    ClearRecord,
-    Record(bool),
     AssignOnset(u8, bool, Onset),
-    AssignPhrase(u8),
     ClearGhost,
     PushGhost(u8),
-    ClearSequence,
-    PushSequence(u8),
     AssignGlobal(Global),
 }
 
@@ -50,7 +47,7 @@ impl From<Fraction> for f32 {
 
 #[derive(Clone, miniserde::Deserialize)]
 pub struct Rd {
-    pub tempo: f32,
+    pub tempo: Option<f32>,
     pub steps: u16,
     pub onsets: Vec<u64>,
 }
@@ -72,21 +69,4 @@ pub enum Event {
     Sync,
     Hold { index: u8 },
     Loop { index: u8, len: Fraction },
-}
-
-struct Stamped {
-    event: Event,
-    steps: u16,
-}
-
-#[derive(Default)]
-pub struct Phrase {
-    offset: u16,
-    events: Vec<Stamped>,
-}
-
-impl Phrase {
-    fn is_empty(&self) -> bool {
-        self.offset == 0 && self.events.is_empty()
-    }
 }

@@ -143,7 +143,7 @@ where
     let out_fn = move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
         pads.tick(data, channels).unwrap();
     };
-    let err_fn = |err| eprintln!("error occurred on stream: {}", err);
+    let err_fn = |_| {};
     let stream = device.build_output_stream(config, out_fn, err_fn, None)?;
 
     stream.play()?;

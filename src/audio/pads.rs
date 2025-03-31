@@ -5,9 +5,7 @@ use cpal::{FromSample, SizedSample};
 #[derive(Default)]
 struct Pad {
     onsets: [Option<Onset>; 2],
-    phrase: Phrase,
     onset_weight: u8,
-    phrase_weight: u8,
 }
 
 struct Pads<const N: usize> {
@@ -65,31 +63,42 @@ impl<const N: usize> Pads<N> {
     fn onset_weights(&self) -> [u8; N] {
         core::array::from_fn(|i| self.inner[i].onset_weight)
     }
+}
 
-    fn phrase_weights(&self) -> [u8; N] {
-        core::array::from_fn(|i| self.inner[i].phrase_weight)
+struct Mod<T: Copy + std::ops::Mul> {
+    base: T,
+    offset: T,
+}
+
+impl<T: Copy + std::ops::Mul> Mod<T> {
+    pub fn new(base: T, offset: T) -> Self {
+        Self { base, offset }
+    }
+
+    pub fn get(&self) -> T::Output {
+        self.base * self.offset
     }
 }
 
 pub struct PadsHandler<const N: usize> {
-    clock: u8,
+    clock: f32,
     quant: bool,
     state: active::State,
     input: Option<Event>,
-    phrase: Option<active::Phrase>,
-    record: Option<active::Record>,
     pads: Pads<N>,
     bias: f32,
     roll: f32,
     drift: f32,
     width: f32,
     tempo: f32,
+    speed: Mod<f32>,
     input_rx: std::sync::mpsc::Receiver<Cmd>,
 }
 
 impl<const N: usize> PadsHandler<N> {
     fn read_grain<T>(
         tempo: f32,
+        speed: f32,
         width: f32,
         onset: &mut active::Onset,
         buffer: &mut [T],
@@ -98,7 +107,11 @@ impl<const N: usize> PadsHandler<N> {
     where
         T: SizedSample + FromSample<f32>,
     {
-        let speed = tempo * STEP_DIV as f32 / onset.wav.tempo;
+        let speed = if let Some(t) = onset.wav.tempo {
+            tempo * STEP_DIV as f32 / t * speed
+        } else {
+            speed
+        };
         let rem = (GRAIN_LEN as f32 * 2. * speed) as usize & !1;
         let mut read = vec![0u8; rem + 2];
         let mut slice = &mut read[..];
@@ -143,6 +156,7 @@ impl<const N: usize> PadsHandler<N> {
 
     fn handle_event<T>(
         tempo: f32,
+        speed: f32,
         width: f32,
         event: &mut active::Event,
         buffer: &mut [T],
@@ -151,9 +165,10 @@ impl<const N: usize> PadsHandler<N> {
     where
         T: SizedSample + FromSample<f32>,
     {
+        // FIXME: init tempo of 0. means no playback until clock start (then can stop) to init tempo to nonzero
         if tempo > 0. {
             if let active::Event::Hold(onset) = event {
-                return Self::read_grain(tempo, width, onset, buffer, channels);
+                return Self::read_grain(tempo, speed, width, onset, buffer, channels);
             } else if let active::Event::Loop(onset, len) = event {
                 let wav = &mut onset.wav;
                 let pos = wav.pos()?;
@@ -161,7 +176,7 @@ impl<const N: usize> PadsHandler<N> {
                 if end < pos || pos < onset.start && end < pos + wav.len {
                     wav.seek(onset.start as i64)?;
                 }
-                return Self::read_grain(tempo, width, onset, buffer, channels);
+                return Self::read_grain(tempo, speed, width, onset, buffer, channels);
             }
         }
         for _ in 0..GRAIN_LEN {
@@ -172,18 +187,17 @@ impl<const N: usize> PadsHandler<N> {
 
     pub fn new(input_rx: std::sync::mpsc::Receiver<Cmd>) -> Self {
         Self {
-            clock: 0,
+            clock: 0.,
             quant: false,
             state: active::State::Input(active::Event::Sync),
             input: None,
-            phrase: None,
-            record: None,
             pads: Pads::new(),
             bias: 0.,
             roll: 0.,
             drift: 0.,
             width: 1.,
             tempo: 0.,
+            speed: Mod::new(1., 1.),
             input_rx,
         }
     }
@@ -196,52 +210,63 @@ impl<const N: usize> PadsHandler<N> {
             match cmd {
                 Cmd::Start => self.cmd_start()?,
                 Cmd::Clock => self.cmd_clock()?,
-                Cmd::Quant(quant) => self.cmd_quant(quant)?,
+                Cmd::Stop => self.cmd_stop()?,
                 Cmd::Input(event) => self.cmd_input(event)?,
                 Cmd::AssignTempo(tempo) => self.tempo = tempo,
-                Cmd::ClearRecord => self.cmd_clear_record(),
-                Cmd::Record(recording) => self.cmd_record(recording),
-                Cmd::AssignOnset(index, alt, onset) => self.cmd_assign_onset(index, alt, onset),
-                Cmd::AssignPhrase(index) => self.cmd_assign_phrase(index),
+                Cmd::AssignSpeed(speed) => self.speed.base = speed,
+                Cmd::OffsetSpeed(speed) => self.speed.offset = speed,
+                Cmd::AssignOnset(index, alt, onset) => self.cmd_assign_onset(index, alt, onset)?,
                 Cmd::ClearGhost => self.cmd_clear_ghost(),
                 Cmd::PushGhost(index) => self.cmd_push_ghost(index),
-                Cmd::ClearSequence => self.cmd_clear_sequence(),
-                Cmd::PushSequence(index) => self.cmd_push_sequence(index)?,
                 Cmd::AssignGlobal(global) => self.cmd_assign_global(global),
             }
         }
-        let mut event = &mut active::Event::Sync;
-        if let active::State::Input(e) | active::State::Ghost(e, ..) = &mut self.state {
-            event = e;
-        } else if let Some(e) = self.phrase.as_mut().unwrap().event.as_mut() {
-            event = e;
-        }
-        Self::handle_event(self.tempo, self.width, event, buffer, channels)?;
+        let event = match &mut self.state {
+            active::State::Input(event) => event,
+            active::State::Ghost(event, ..) => event,
+        };
+        Self::handle_event(self.tempo, self.speed.get(), self.width, event, buffer, channels)?;
         Ok(())
     }
 
     fn cmd_start(&mut self) -> Result<()> {
         self.quant = true;
-        self.clock = 0;
+        self.clock = 0.;
         Ok(())
     }
 
     fn cmd_clock(&mut self) -> Result<()> {
-        self.clock += 1;
+        self.quant = true;
         if let Some(input) = self.input.take() {
             self.process_input(input)?;
+        } else {
+            self.clock += 1.;
+            // sync with clock
+            let event = match &mut self.state {
+                active::State::Input(event) => event,
+                active::State::Ghost(event, ..) => event,
+            };
+            if let active::Event::Hold(onset) = event {
+                let wav = &mut onset.wav;
+                if wav.tempo.is_some() {
+                    let offset = (wav.len as f32 / wav.steps as f32 * self.clock) as i64 & !1;
+                    wav.seek(onset.start as i64 + offset)?;
+                }
+            } else if let active::Event::Loop(onset, len) = event {
+                let wav = &mut onset.wav;
+                if wav.tempo.is_some() {
+                    let offset = (wav.len as f32 / wav.steps as f32 * (self.clock % f32::from(*len))) as i64 & !1;
+                    wav.seek(onset.start as i64 + offset)?;
+                }
+            }
         }
         self.advance_active()?;
         Ok(())
     }
 
-    fn cmd_quant(&mut self, quant: bool) -> Result<()> {
-        self.quant = quant;
-        if !quant {
-            if let Some(input) = self.input.take() {
-                self.process_input(input)?;
-            }
-        }
+    fn cmd_stop(&mut self) -> Result<()> {
+        self.quant = false;
+        self.clock = 0.;
         Ok(())
     }
 
@@ -254,26 +279,12 @@ impl<const N: usize> PadsHandler<N> {
         Ok(())
     }
 
-    fn cmd_clear_record(&mut self) {
-        self.record = None;
-    }
-
-    fn cmd_record(&mut self, recording: bool) {
-        if recording {
-            self.record = Some(active::Record::default());
-        } else if let Some(active::Record { stopped, .. }) = self.record.as_mut() {
-            *stopped = true;
-        }
-    }
-
-    fn cmd_assign_onset(&mut self, index: u8, alt: bool, onset: Onset) {
+    fn cmd_assign_onset(&mut self, index: u8, alt: bool, onset: Onset) -> Result<()> {
         self.pads.inner[index as usize].onsets[alt as usize] = Some(onset);
-    }
-
-    fn cmd_assign_phrase(&mut self, index: u8) {
-        if let Some(active::Record { phrase, .. }) = self.record.take() {
-            self.pads.inner[index as usize].phrase = phrase;
-        }
+        let onset = self.pads.onset_seek(index, alt, self.generate_pan(index))?;
+        self.state = active::State::Input(active::Event::Hold(onset));
+        self.clock = 0.;
+        Ok(())
     }
 
     fn cmd_clear_ghost(&mut self) {
@@ -285,24 +296,6 @@ impl<const N: usize> PadsHandler<N> {
     fn cmd_push_ghost(&mut self, index: u8) {
         let weight = &mut self.pads.inner[index as usize].onset_weight;
         *weight = (*weight + 1).min(15);
-    }
-
-    fn cmd_clear_sequence(&mut self) {
-        for Pad { phrase_weight, .. } in self.pads.inner.iter_mut() {
-            *phrase_weight = 0;
-        }
-        if let Some(active::Phrase { event_rem, phrase_rem, .. }) = self.phrase.as_mut() {
-            *phrase_rem = *event_rem;
-        }
-    }
-
-    fn cmd_push_sequence(&mut self, index: u8) -> Result<()> {
-        let weight = &mut self.pads.inner[index as usize].phrase_weight;
-        *weight = (*weight + 1).min(15);
-        if self.phrase.is_none() {
-            self.phrase = self.generate_phrase()?;
-        }
-        Ok(())
     }
 
     fn cmd_assign_global(&mut self, global: Global) {
@@ -317,38 +310,13 @@ impl<const N: usize> PadsHandler<N> {
     fn process_input(&mut self, event: Event) -> Result<()> {
         match event {
             Event::Sync => {
-                match &mut self.phrase {
-                    Some(active::Phrase {
-                        event_rem,
-                        event: Some(active::Event::Hold(onset)),
-                        ..
-                    }) => {
-                        // catch up to phrase
-                        let offset = *event_rem as u64 * onset.wav.len / onset.wav.steps as u64;
-                        onset.wav.seek(onset.start as i64 + offset as i64)?;
-                        self.state = active::State::Phrase;
-                    }
-                    Some(active::Phrase {
-                        event_rem,
-                        event: Some(active::Event::Loop(onset, len)),
-                        ..
-                    }) => {
-                        // catch up to phrase
-                        let offset = *event_rem as f32 % f32::from(*len)
-                            * onset.wav.len as f32
-                            / onset.wav.steps as f32;
-                        onset.wav.seek(onset.start as i64 + offset as i64)?;
-                        self.state = active::State::Phrase;
-                    }
-                    _ => {
-                        // generate ghost?
-                        if let Some((input, rem)) = self.generate_ghost()? {
-                            self.state = active::State::Ghost(input, rem);
-                        } else {
-                            self.state = active::State::Input(active::Event::Sync);
-                        }
-                    }
+                // generate ghost?
+                if let Some((input, rem)) = self.generate_ghost()? {
+                    self.state = active::State::Ghost(input, rem);
+                } else {
+                    self.state = active::State::Input(active::Event::Sync);
                 }
+                self.clock = 0.;
             }
             Event::Hold { index } => {
                 if let active::State::Input(active::Event::Loop(onset, ..)) = &mut self.state {
@@ -361,6 +329,7 @@ impl<const N: usize> PadsHandler<N> {
                 } else if let Some(alt) = self.generate_alt(index) {
                     let onset = self.pads.onset_seek(index, alt, self.generate_pan(index))?;
                     self.state = active::State::Input(active::Event::Hold(onset));
+                    self.clock = 0.;
                 }
             }
             Event::Loop { index, len } => {
@@ -374,73 +343,23 @@ impl<const N: usize> PadsHandler<N> {
                         // i don't know either, girl
                         onset.wav.file = onset.wav.file.try_clone()?;
                         self.state = active::State::Input(active::Event::Loop(onset, len));
+                        self.clock += f32::from(len);
                     }
                     _ => {
                         if let Some(alt) = self.generate_alt(index) {
                             let onset = self.pads.onset(index, alt, self.generate_pan(index))?;
                             self.state = active::State::Input(active::Event::Loop(onset, len));
                         }
+                        self.clock = 0.;
                     }
                 }
             }
-        }
-        if let Some(active::Record { stopped: false, phrase }) = self.record.as_mut() {
-            phrase.events.push(Stamped { event, steps: 0 });
         }
         Ok(())
     }
 
     fn advance_active(&mut self) -> Result<()> {
-        self.try_advance_phrase()?;
         self.try_advance_ghost()?;
-        self.try_advance_record();
-        Ok(())
-    }
-
-    /// advance phrase, if any
-    fn try_advance_phrase(&mut self) -> Result<()> {
-        if let Some(active::Phrase {
-            index,
-            next,
-            event_rem,
-            phrase_rem,
-            ..
-        }) = self.phrase.as_mut() {
-            *event_rem = event_rem.saturating_sub(1);
-            *phrase_rem = phrase_rem.saturating_sub(1);
-            if *phrase_rem == 0 {
-                // generate phrase
-                self.clock = 0;
-                let phrase = self.generate_phrase()?;
-                self.phrase = phrase;
-            } else if *event_rem == 0 {
-                // generate event
-                let index = *index;
-                let next = *next + 1;
-                let phrase_rem = *phrase_rem;
-                let (event, event_rem) = self.generate_stamped(index, next)?;
-                self.phrase = Some(active::Phrase {
-                    index,
-                    next,
-                    event_rem,
-                    phrase_rem,
-                    event: Some(event),
-                });
-            }
-            // process phrase event, if any
-            if !matches!(&self.state, active::State::Input(event) if !matches!(event, active::Event::Sync)) {
-                if matches!(&self.phrase, Some(active::Phrase { event: Some(event), .. }) if !matches!(event, active::Event::Sync)) {
-                    self.state = active::State::Phrase;
-                } else if matches!(&self.state, active::State::Phrase) {
-                    // generate ghost?
-                    if let Some((event, rem)) = self.generate_ghost()? {
-                        self.state = active::State::Ghost(event, rem);
-                    } else {
-                        self.state = active::State::Input(active::Event::Sync);
-                    }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -459,20 +378,6 @@ impl<const N: usize> PadsHandler<N> {
             }
         }
         Ok(())
-    }
-
-    /// advance record, if any
-    fn try_advance_record(&mut self) {
-        if let Some(active::Record {
-            stopped: false,
-            phrase: Phrase { offset, events },
-        }) = self.record.as_mut() {
-            if let Some(Stamped { steps, .. }) = events.last_mut() {
-                *steps += 1;
-            } else {
-                *offset += 1;
-            }
-        }
     }
 
     fn generate_alt(&self, index: impl Into<usize>) -> Option<bool> {
@@ -518,64 +423,5 @@ impl<const N: usize> PadsHandler<N> {
             (active::Event::Sync, steps)
         };
         Ok(Some((input, rem)))
-    }
-
-    fn generate_stamped(&mut self, index: u8, next: usize) -> Result<(active::Event, u16)> {
-        let Phrase { events, .. } = &self.pads.inner[index as usize].phrase;
-        let drift = rand::random_range(0..=((self.drift * events.len() as f32 - 1.).round()) as usize);
-        let index = (next + drift) % events.len();
-        let Stamped { event, steps } = &events[index];
-        let mut active = active::Event::Sync;
-        if let Event::Hold { index } = event {
-            if let Some(alt) = self.generate_alt(*index) {
-                let onset = self.pads.onset_seek(*index, alt, self.generate_pan(*index))?;
-                active = active::Event::Hold(onset);
-            }
-        } else if let Event::Loop { index, len } = event {
-            if let Some(alt) = self.generate_alt(*index) {
-                let onset = self.pads.onset(*index, alt, self.generate_pan(*index))?;
-                active = active::Event::Loop(onset, *len);
-            }
-        }
-        Ok((active, *steps))
-    }
-
-    fn generate_phrase(&mut self) -> Result<Option<active::Phrase>> {
-        let mut weights = self.pads.phrase_weights();
-        let sum = self.pads.inner.iter().fold(0, |acc, v| {
-            acc + v.phrase_weight as u16 * !v.phrase.is_empty() as u16
-        });
-        if sum == 0 {
-            return Ok(None);
-        }
-        let mut offset = rand::random_range(1..=sum);
-        let mut index = 0;
-        while offset > 0 {
-            while weights[index] == 0 || self.pads.inner[index].phrase.is_empty() {
-                index += 1;
-            }
-            weights[index] -= 1;
-            offset -= 1;
-        }
-        let phrase = &self.pads.inner[index].phrase;
-        let phrase_rem = phrase.offset + phrase.events.iter().fold(0, |acc, v| acc + v.steps);
-        if phrase.offset == 0 {
-            let (input, event_rem) = self.generate_stamped(index as u8, 0)?;
-            Ok(Some(active::Phrase {
-                index: index as u8,
-                next: 1,
-                event_rem,
-                phrase_rem,
-                event: Some(input),
-            }))
-        } else {
-            Ok(Some(active::Phrase {
-                index: index as u8,
-                next: 0,
-                event_rem: phrase.offset,
-                phrase_rem,
-                event: None,
-            }))
-        }
     }
 }

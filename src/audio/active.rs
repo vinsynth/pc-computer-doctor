@@ -5,7 +5,7 @@ use std::{
 };
 
 pub struct Wav {
-    pub tempo: f32,
+    pub tempo: Option<f32>,
     pub steps: u16,
     pub file: File,
     pub len: u64,
@@ -41,30 +41,10 @@ pub enum Event {
 pub enum State {
     Input(Event),
     Ghost(Event, u16),
-    Phrase,
 }
 
 impl Default for State {
     fn default() -> Self {
         State::Input(Event::Sync)
     }
-}
-
-pub struct Phrase {
-    /// source phrase index
-    pub index: u8,
-    /// next event index
-    pub next: usize,
-    /// remaining steps in event
-    pub event_rem: u16,
-    /// remaining steps in phrase
-    pub phrase_rem: u16,
-    /// active event, if any
-    pub event: Option<Event>,
-}
-
-#[derive(Default)]
-pub struct Record {
-    pub stopped: bool,
-    pub phrase: super::Phrase,
 }
