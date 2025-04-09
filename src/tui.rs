@@ -1,5 +1,4 @@
 use crate::audio::PAD_COUNT;
-use crate::input::Global;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind};
@@ -26,36 +25,31 @@ macro_rules! down {
 
 pub enum Cmd {
     Clear,
-    Start,
     Clock,
-    Global(Global),
+    Stop,
+    AssignBias(u8),
+    AssignDrift(u8),
     Alt(bool),
+    Hold(bool),
+    Fs(Option<[String; FILE_COUNT]>),
+    AssignOnset { name: String, index: usize, count: usize },
     Pad(u8, bool),
-    Ghost(bool),
-    Sequence(bool),
-    Record,
-    Phrase,
-    Dir(Option<[String; FILE_COUNT]>),
-    File {
-        name: String,
-        index: usize,
-        count: usize,
-    },
+    BakeRecord(Option<u8>, u16),
+    Pool,
 }
 
 #[derive(Default)]
 enum State {
     #[default]
-    None,
-    Ghost([u8; PAD_COUNT]),
-    Sequence([u8; PAD_COUNT]),
-    Dir(Option<[String; FILE_COUNT]>),
-    File {
-        path: String,
+    Clear,
+    Fs(Option<[String; FILE_COUNT]>),
+    AssignOnset {
+        name: String,
         index: usize,
         count: usize,
     },
-    Phrase,
+    BakeRecord(Option<u8>, u16),
+    Pool(bool),
 }
 
 #[derive(Default)]
@@ -68,14 +62,16 @@ struct Pad {
 #[derive(Default)]
 pub struct Tui {
     exit: bool,
-    pads: [Pad; PAD_COUNT],
-    alt: bool,
     clock: bool,
-    recording: bool,
+
     bias: u8,
-    roll: u8,
     drift: u8,
-    width: u8,
+
+    alt: bool,
+    hold: bool,
+    pads: [Pad; PAD_COUNT],
+    pool: Vec<u8>,
+
     state: State,
 }
 
@@ -116,75 +112,45 @@ impl Tui {
 
     fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Clear => self.state = State::None,
-            Cmd::Start => self.clock = false,
-            Cmd::Clock => self.clock = !self.clock,
-            Cmd::Global(global) => match global {
-                Global::Bias(value) => self.bias = value,
-                Global::Roll(value) => self.roll = value,
-                Global::Drift(value) => self.drift = value,
-                Global::Width(value) => self.width = value,
+            Cmd::Clear => {
+                if let State::BakeRecord(Some(index), ..) = self.state {
+                    // assign phrase
+                    self.pads[index as usize].phrase = true;
+                }
+                self.state = State::Clear;
             },
-            Cmd::Alt(alt) => self.alt = alt,
+            Cmd::Clock => self.clock = !self.clock,
+            Cmd::Stop => self.clock = false,
+            Cmd::AssignBias(v) => self.bias = v,
+            Cmd::AssignDrift(v) => self.drift = v,
+            Cmd::Alt(v) => self.alt = v,
+            Cmd::Hold(v) => self.hold = v,
+            Cmd::Fs(paths) => self.state = State::Fs(paths),
+            Cmd::AssignOnset { name, index, count } => self.state = State::AssignOnset { name, index, count },
             Cmd::Pad(index, down) => {
                 let pad = &mut self.pads[index as usize];
                 pad.down = down;
-                match self.state {
-                    State::Dir(_) => self.state = State::None,
-                    State::File { .. } => {
-                        if self.alt {
-                            pad.onsets[1] = true;
-                        } else {
-                            pad.onsets[0] = true;
-                        }
-                    }
-                    State::Phrase => {
-                        if down {
-                            pad.phrase = true;
-                        } else {
-                            self.state = State::None;
-                        }
-                    }
-                    State::Ghost(ref mut weights) => {
-                        if down {
-                            weights[index as usize] = (weights[index as usize] + 1).min(15);
-                        }
-                    }
-                    State::Sequence(ref mut weights) => {
-                        if down {
-                            weights[index as usize] = (weights[index as usize] + 1).min(15);
-                        }
-                    }
-                    _ => (),
-                }
-            }
-            Cmd::Ghost(down) => {
                 if down {
-                    self.state = State::Ghost([0; PAD_COUNT]);
-                } else {
-                    self.state = State::None;
+                    match self.state {
+                        State::AssignOnset { .. } => {
+                            if self.alt {
+                                pad.onsets[1] = true;
+                            } else {
+                                pad.onsets[0] = true;
+                            }
+                        }
+                        State::Pool(cleared) => {
+                            if !cleared {
+                                self.pool.clear();
+                            }
+                            self.pool.push(index)
+                        }
+                        _ => (),
+                    }
                 }
             }
-            Cmd::Sequence(down) => {
-                if down {
-                    self.state = State::Sequence([0; PAD_COUNT]);
-                } else {
-                    self.state = State::None;
-                }
-            }
-            Cmd::Record => self.recording = true,
-            Cmd::Phrase => {
-                self.state = State::Phrase;
-                self.recording = false;
-            }
-            Cmd::Dir(paths) => self.state = State::Dir(paths),
-            Cmd::File {
-                name: path,
-                index,
-                count,
-            } => {
-                self.state = State::File { path, index, count };
-            }
+            Cmd::BakeRecord(index, len) => self.state = State::BakeRecord(index, len),
+            Cmd::Pool => self.state = State::Pool(false),
         }
     }
 
@@ -192,16 +158,13 @@ impl Tui {
         frame.render_widget(self, frame.area());
     }
 
-    fn render_state_none(&self, area: Rect, buf: &mut Buffer) {
+    fn render_state_clear(&self, area: Rect, buf: &mut Buffer) {
         let [pad_area, global_area] =
             Layout::horizontal(vec![Constraint::Max(8), Constraint::Max(14)])
                 .flex(Flex::Center)
                 .areas(area);
 
-        let mut block = Block::bordered().bold().padding(Padding::horizontal(1));
-        if self.recording {
-            block = block.reversed();
-        }
+        let block = Block::bordered().bold().padding(Padding::horizontal(1));
         Paragraph::new(Text::raw(String::from_iter(self.pads.iter().map(|p| {
             if p.down {
                 'o'
@@ -215,9 +178,7 @@ impl Tui {
 
         let global_text = Text::from(vec![
             Line::raw(format!(" bias: {:>3}", self.bias)).italic(),
-            Line::raw(format!(" roll: {:>3}", self.roll)).italic(),
             Line::raw(format!("drift: {:>3}", self.drift)).italic(),
-            Line::raw(format!("width: {:>3}", self.width)).italic(),
         ]);
         Paragraph::new(global_text)
             .left_aligned()
@@ -225,64 +186,7 @@ impl Tui {
             .render(global_area, buf);
     }
 
-    fn render_state_ghost(&self, weights: &[u8; 8], area: Rect, buf: &mut Buffer) {
-        let [pad_area] = Layout::horizontal(vec![Constraint::Max(14)])
-            .flex(Flex::Center)
-            .areas(area);
-        Paragraph::new(Text::raw(String::from_iter(
-            weights.iter().map(|v| format!("{:x}", v)),
-        )))
-        .block(
-            Block::bordered()
-                .bold()
-                .title(" ghost pool ")
-                .padding(Padding::horizontal(4)),
-        )
-        .wrap(Wrap { trim: true })
-        .render(pad_area, buf);
-    }
-
-    fn render_state_sequence(&self, weights: &[u8; 8], area: Rect, buf: &mut Buffer) {
-        let [pad_area] = Layout::horizontal(vec![Constraint::Max(16)])
-            .flex(Flex::Center)
-            .areas(area);
-        Paragraph::new(Text::raw(String::from_iter(
-            weights.iter().map(|v| format!("{:x}", v)),
-        )))
-        .block(
-            Block::bordered()
-                .bold()
-                .title(" pattern pool ")
-                .padding(Padding::horizontal(5)),
-        )
-        .wrap(Wrap { trim: true })
-        .render(pad_area, buf);
-    }
-
-    fn render_state_phrase(&self, area: Rect, buf: &mut Buffer) {
-        let [pad_area] = Layout::horizontal(vec![Constraint::Max(18)])
-            .flex(Flex::Center)
-            .areas(area);
-        Paragraph::new(Text::raw(String::from_iter(self.pads.iter().map(|p| {
-            if p.down {
-                'o'
-            } else if p.phrase {
-                'p'
-            } else {
-                '.'
-            }
-        }))))
-        .block(
-            Block::bordered()
-                .bold()
-                .title(" assign to pad: ")
-                .padding(Padding::horizontal(6)),
-        )
-        .wrap(Wrap { trim: true })
-        .render(pad_area, buf);
-    }
-
-    fn render_state_dir(&self, paths: &Option<[String; 5]>, area: Rect, buf: &mut Buffer) {
+    fn render_state_fs(&self, paths: &Option<[String; 5]>, area: Rect, buf: &mut Buffer) {
         let text = if let Some(paths) = paths {
             let mut lines = paths.clone().map(Line::raw).to_vec();
             let mid = lines.len() / 2;
@@ -301,7 +205,7 @@ impl Tui {
             .render(area, buf);
     }
 
-    fn render_state_file(
+    fn render_state_assign_onset(
         &self,
         path: &str,
         index: &usize,
@@ -355,6 +259,60 @@ impl Tui {
             .block(Block::new().padding(Padding::new(0, 0, FILE_COUNT as u16, 1)))
             .render(arrow_area, buf);
     }
+
+    fn render_state_bake_record(&self, index: &Option<u8>, len: &u16, area: Rect, buf: &mut Buffer) {
+        let [area] = Layout::horizontal(vec![Constraint::Max(18)])
+            .flex(Flex::Center)
+            .areas(area);
+        let [pad_area, len_area] = Layout::vertical(vec![Constraint::Max(3), Constraint::Max(2)])
+            .flex(Flex::SpaceBetween)
+            .areas(area);
+        let mut text = String::from_iter(self.pads.iter().map(|p| {
+            if p.down {
+                '-'
+            } else {
+                '.'
+            }
+        }));
+        if let Some(index) = index {
+            text.replace_range(*index as usize..=*index as usize, "o");
+        }
+        Block::bordered().bold().title(" assign to pad: ").render(pad_area, buf);
+        Paragraph::new(Text::raw(text).centered())
+            .wrap(Wrap { trim: true })
+            .render(pad_area, buf);
+        Paragraph::new(Text::raw(format!("length: {:>3}", len)).centered())
+            .wrap(Wrap { trim: true })
+            .render(len_area, buf);
+    }
+
+    fn render_state_pool(&self, area: Rect, buf: &mut Buffer) {
+        let [pad_area, pool_area] =
+            Layout::horizontal(vec![Constraint::Min(8), Constraint::Percentage(100)]).areas(area);
+        let [_, arrow_area] = Layout::horizontal(vec![Constraint::Max(7), Constraint::Max(2)])
+            .flex(Flex::Start)
+            .areas(area);
+        Paragraph::new(Text::raw(String::from_iter(self.pads.iter().map(|p| {
+            if p.down {
+                'o'
+            } else if p.phrase {
+                'p'
+            } else {
+                '.'
+            }
+        }))))
+        .block(Block::bordered().bold().padding(Padding::new(1, 1, FILE_COUNT as u16 - 2, 0)))
+        .wrap(Wrap { trim: true })
+        .render(pad_area, buf);
+
+        Paragraph::new(Text::raw(format!("{:?}", self.pool)).left_aligned())
+            .block(Block::bordered().title(" build a sequence: ").padding(Padding::horizontal(1)))
+            .render(pool_area, buf);
+       
+        Paragraph::new(Text::raw("<<"))
+            .block(Block::new().padding(Padding::new(0, 0, FILE_COUNT as u16, 1)))
+            .render(arrow_area, buf);
+    }
 }
 
 impl Widget for &Tui {
@@ -374,14 +332,13 @@ impl Widget for &Tui {
             Block::new().render(right, buf);
         }
         match &self.state {
-            State::None => self.render_state_none(area, buf),
-            State::Dir(paths) => self.render_state_dir(paths, area, buf),
-            State::File { path, index, count } => {
-                self.render_state_file(path, index, count, area, buf)
+            State::Clear => self.render_state_clear(area, buf),
+            State::Fs(paths) => self.render_state_fs(paths, area, buf),
+            State::AssignOnset { name, index, count } => {
+                self.render_state_assign_onset(name, index, count, area, buf)
             }
-            State::Phrase => self.render_state_phrase(area, buf),
-            State::Ghost(weights) => self.render_state_ghost(weights, area, buf),
-            State::Sequence(weights) => self.render_state_sequence(weights, area, buf),
+            State::BakeRecord(index, len) => self.render_state_bake_record(index, len, area, buf),
+            State::Pool(_) => self.render_state_pool(area, buf),
         }
     }
 }

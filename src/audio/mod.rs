@@ -1,27 +1,31 @@
+use color_eyre::Result;
+
 pub mod pads;
 pub mod active;
-use crate::input::Global;
-
-use color_eyre::Result;
 
 pub const PAD_COUNT: usize = 8;
 pub const GRAIN_LEN: usize = 1024;
 pub const PPQ: u8 = 24;
 pub const STEP_DIV: u8 = 4;
 pub const LOOP_DIV: u8 = 8;
+pub const MAX_PHRASE_LEN: u16 = 2u16.pow(PAD_COUNT as u32 - 1) - 1;
 
 pub enum Cmd {
     Start,
     Clock,
     Stop,
     AssignTempo(f32),
+    AssignBias(f32),
+    AssignDrift(f32),
     AssignSpeed(f32),
     OffsetSpeed(f32),
-    Input(Event),
+    AssignWidth(f32),
     AssignOnset(u8, bool, Onset),
-    ClearGhost,
-    PushGhost(u8),
-    AssignGlobal(Global),
+    Input(Event),
+    BakeRecord(u16),
+    TakeRecord(Option<u8>),
+    PushPool(u8),
+    ClearPool,
 }
 
 #[derive(Copy, Clone)]
@@ -65,8 +69,31 @@ pub struct Onset {
     pub steps: u16,
 }
 
+#[derive(Clone)]
 pub enum Event {
     Sync,
     Hold { index: u8 },
     Loop { index: u8, len: Fraction },
+}
+
+#[derive(Clone)]
+struct Stamped {
+    event: Event,
+    step: u16,
+}
+
+pub struct Phrase {
+    events: Vec<Stamped>,
+    len: u16,
+}
+
+impl Phrase {
+    fn generate_stamped<const N: usize>(&self, active: &mut active::Event, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<Option<u16>> {
+        let drift = rand::random_range(0..=((drift * self.events.len() as f32 - 1.).round()) as usize);
+        let index = drift % self.events.len();
+        let Stamped { event, step } = &self.events[index];
+        let event_rem = self.events.get(index + 1).map(|v| v.step).unwrap_or(self.len) - step;
+        active.trans(event, bias, pads)?;
+        Ok(Some(event_rem))
+    }
 }
