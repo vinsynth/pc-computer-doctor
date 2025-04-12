@@ -131,7 +131,7 @@ impl Tui {
                 let pad = &mut self.pads[index as usize];
                 pad.down = down;
                 if down {
-                    match self.state {
+                    match &mut self.state {
                         State::AssignOnset { .. } => {
                             if self.alt {
                                 pad.onsets[1] = true;
@@ -140,7 +140,8 @@ impl Tui {
                             }
                         }
                         State::Pool(cleared) => {
-                            if !cleared {
+                            if !*cleared {
+                                *cleared = true;
                                 self.pool.clear();
                             }
                             self.pool.push(index)
@@ -177,8 +178,8 @@ impl Tui {
         .render(pad_area, buf);
 
         let global_text = Text::from(vec![
-            Line::raw(format!(" bias: {:>3}", self.bias)).italic(),
             Line::raw(format!("drift: {:>3}", self.drift)).italic(),
+            Line::raw(format!(" bias: {:>3}", self.bias)).italic(),
         ]);
         Paragraph::new(global_text)
             .left_aligned()

@@ -105,7 +105,7 @@ impl InputHandler {
                             self.downs.retain(|&v| v != index);
                             self.tui_tx.send(tui::Cmd::Pad(index, false))?;
                             match self.state {
-                                State::Pads => if !self.hold {
+                                State::Pads | State::AssignOnset { .. } => if !self.hold {
                                     self.handle_pad_input()?;
                                 }
                                 State::Fs { .. } => {
@@ -116,9 +116,6 @@ impl InputHandler {
                                     }
                                 }
                                 _ => (),
-                            }
-                            if !self.hold {
-                                self.handle_pad_input()?;
                             }
                         }
                         _ => (),
@@ -164,23 +161,22 @@ impl InputHandler {
                                     } = self.state {
                                         let len = std::fs::metadata(path)?.len() - 44;
                                         let start = rd.onsets[*onset];
-                                        let end = rd.onsets.get(*onset + 1).copied().unwrap_or(len);
-                                        let steps = ((end - start) as f32 * rd.steps as f32 / len as f32).round() as u16;
                                         let wav = audio::Wav {
                                             rd: rd.clone(),
                                             path: path.clone(),
                                             len,
                                         };
-                                        let onset = audio::Onset { wav, start, steps };
+                                        let onset = audio::Onset { wav, start };
                                         self.pads_tx.send(audio::Cmd::AssignOnset(index, self.alt, onset))?;
                                     }
                                 }
                                 State::BakeRecord { .. } => {
                                     if self.downs.len() > 1 {
+                                        let index = self.downs[0];
                                         let len = self.downs.iter().skip(1).map(|v| {
-                                            v.checked_sub(index + 1).unwrap_or(v + PAD_COUNT as u8 - 1 - index) as u16
+                                            v.checked_sub(index + 1).unwrap_or(v + PAD_COUNT as u8 - 1 - index)
                                         })
-                                        .fold(0u16, |acc, v| acc | (1 << v));
+                                        .fold(0u8, |acc, v| acc | (1 << v)) as u16;
                                         self.pads_tx.send(audio::Cmd::BakeRecord(len))?;
                                         self.tui_tx.send(tui::Cmd::BakeRecord(self.downs.first().copied(), len))?;
                                     }

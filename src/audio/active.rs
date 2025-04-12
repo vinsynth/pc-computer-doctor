@@ -34,12 +34,12 @@ pub struct Onset {
 
 pub enum Event {
     Sync,
-    Hold(Onset),
-    Loop(Onset, Fraction),
+    Hold(Onset, u16),
+    Loop(Onset, u16, Fraction),
 }
 
 impl Event {
-    pub fn trans<const N: usize>(&mut self, input: &super::Event, bias: f32, pads: &pads::Pads<N>) -> Result<()> {
+    pub fn trans<const N: usize>(&mut self, input: &super::Event, step: u16, bias: f32, pads: &pads::Pads<N>) -> Result<()> {
         match input {
             super::Event::Sync => {
                 *self = Event::Sync;
@@ -51,25 +51,25 @@ impl Event {
                     let mut onset = unsafe { std::mem::replace(uninit, MaybeUninit::uninit()).assume_init() };
                     // i don't know either, girl
                     onset.wav.file = onset.wav.file.try_clone()?;
-                    *self = Event::Hold(onset);
+                    *self = Event::Hold(onset, step);
                 } else if let Some(alt) = pads.generate_alt(*index, bias) {
                     let onset = pads.onset_seek(*index, alt, pads::Pads::<N>::generate_pan(*index))?;
-                    *self = Event::Hold(onset);
+                    *self = Event::Hold(onset, step);
                 }
             }
             super::Event::Loop { index, len } => {
                 match self {
-                    Event::Hold(onset) | Event::Loop(onset, ..) if onset.index == *index => {
+                    Event::Hold(onset, ..) | Event::Loop(onset, ..) if onset.index == *index => {
                         // recast event variant with same Onset
                         let uninit: &mut MaybeUninit<Onset> = unsafe { std::mem::transmute(onset) };
                         let mut onset = unsafe { std::mem::replace(uninit, MaybeUninit::uninit()).assume_init() };
                         // i don't know either, girl
                         onset.wav.file = onset.wav.file.try_clone()?;
-                        *self = Event::Loop(onset, *len);
+                        *self = Event::Loop(onset, step, *len);
                     }
                     _ => if let Some(alt) = pads.generate_alt(*index, bias) {
                         let onset = pads.onset(*index, alt, pads::Pads::<N>::generate_pan(*index))?;
-                        *self = Event::Loop(onset, *len);
+                        *self = Event::Loop(onset, step, *len);
                     }
                 }
             }
@@ -106,7 +106,7 @@ pub struct Record {
     /// baked events
     buffer: Vec<super::Stamped>,
     /// trimmed source phrase, if any
-    phrase: Option<super::Phrase>,
+    pub phrase: Option<super::Phrase>,
     /// active phrase, if any
     pub active: Option<Phrase>,
 }
@@ -122,56 +122,32 @@ impl Record {
     }
 
     pub fn push(&mut self, event: super::Event, step: u16) {
-        self.events.retain(|v| step - v.step < super::MAX_PHRASE_LEN);
+        // remove steps beyond max phrase len
+        while self.events.front().is_some_and(|v| step - v.step > super::MAX_PHRASE_LEN) {
+            self.events.pop_front();
+        }
         self.events.push_back(super::Stamped { event, step });
     }
 
     pub fn bake(&mut self, step: u16) {
-        self.events.retain(|v| step - v.step < super::MAX_PHRASE_LEN);
-        self.buffer = self.events.iter_mut().map(|v| {
-            super::Stamped {
-                event: v.event.clone(),
-                step: v.step - step,
-            }
-        }).collect::<Vec<_>>();
+        self.buffer = self.events.iter().flat_map(|v| Some(super::Stamped {
+            event: v.event.clone(),
+            step: (v.step + super::MAX_PHRASE_LEN).checked_sub(step)?,
+        })).collect::<Vec<_>>();
     }
 
-    pub fn trim<const N: usize>(&mut self, len: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<()> {
-        let events = self.buffer.iter().skip_while(|v| super::MAX_PHRASE_LEN - v.step > len).cloned().collect::<Vec<_>>();
-        let phrase = super::Phrase { events, len };
-        if phrase.events.first().is_some_and(|v| v.step == 0) {
-            // trimmed phrase events start on first step
-            if let Some(Phrase { next, event_rem, phrase_rem, active }) = self.active.as_mut() {
-                if let Some(rem) = self.phrase.as_ref().unwrap().generate_stamped(active, bias, drift, pads)? {
-                    *next = 1;
-                    *event_rem = rem;
-                    *phrase_rem = len;
-                }
-            } else {
-                let mut active = Event::Sync;
-                if let Some(event_rem) = self.phrase.as_ref().unwrap().generate_stamped(&mut active, bias, drift, pads)? {
-                    self.active = Some(Phrase {
-                        next: 1,
-                        event_rem,
-                        phrase_rem: len,
-                        active,
-                    });
-                }
-            }
-        } else {
-            // trimmed phrase events start after first step
-            let event_rem = phrase.events.first().map(|v| v.step).unwrap_or(len);
-            if let Some(active) = self.active.as_mut() {
-                active.next = 0;
-                active.event_rem = event_rem;
-                active.phrase_rem = len;
-            } else {
-                self.active = Some(Phrase {
-                    next: 0,
-                    event_rem,
-                    phrase_rem: len,
-                    active: Event::Sync,
-                });
+    pub fn trim(&mut self, len: u16) {
+        let events = self.buffer.iter().flat_map(|v| Some(super::Stamped {
+            event: v.event.clone(),
+            step: (v.step + len).checked_sub(super::MAX_PHRASE_LEN)?,
+        })).collect::<Vec<_>>();
+        self.phrase = Some(super::Phrase { events, len });
+    }
+
+    pub fn generate_phrase<const N: usize>(&mut self, step: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<()> {
+        if let Some(phrase) = self.phrase.as_mut() {
+            if let Some(phrase) = phrase.generate_active(&mut self.active, step, bias, drift, pads)? {
+                self.active = Some(phrase);
             }
         }
         Ok(())
@@ -204,53 +180,25 @@ impl Pool {
         }
     }
 
-    pub fn generate_phrase<const N: usize>(&mut self, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<Option<u8>> {
-        if !self.phrases.is_empty() {
+    pub fn generate_phrase<const N: usize>(&mut self, step: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<()> {
+        if self.phrases.is_empty() {
+            self.next = 0;
+            self.active = None;
+        } else {
             let index = {
-                // FIXME: use independent phrase_drift instead of same "event_drift"?
+                // FIXME: use independent phrase_drift instead of same "stamped_drift"?
                 let drift = rand::random_range(0..=((drift * self.phrases.len() as f32 - 1.).round()) as usize);
-                let index = self.next + drift % self.phrases.len();
+                let index = (self.next + drift) % self.phrases.len();
                 self.phrases[index]
             };
+            self.index = Some(index);
             if let Some(phrase) = &pads.inner[index as usize].phrase {
-                if phrase.events.first().is_some_and(|v| v.step == 0) {
-                    // phrase events start on first step
-                    if let Some(Phrase { next, event_rem, phrase_rem, active }) = self.active.as_mut() {
-                        if let Some(rem) = phrase.generate_stamped(active, bias, drift, pads)? {
-                            *next = 1;
-                            *event_rem = rem;
-                            *phrase_rem = phrase.len;
-                        }
-                    } else {
-                        let mut active = Event::Sync;
-                        if let Some(event_rem) = phrase.generate_stamped(&mut active, bias, drift, pads)? {
-                            self.active = Some(Phrase {
-                                next: 1,
-                                event_rem,
-                                phrase_rem: phrase.len,
-                                active,
-                            })
-                        }
-                    }
-                } else {
-                    // phrase events start after first step
-                    let event_rem = phrase.events.get(index as usize + 1).map(|v| v.step).unwrap_or(phrase.len);
-                    if let Some(active) = self.active.as_mut() {
-                        active.next = 0;
-                        active.event_rem = event_rem;
-                        active.phrase_rem = phrase.len;
-                    } else {
-                        self.active = Some(Phrase {
-                            next: 0,
-                            event_rem,
-                            phrase_rem: phrase.len,
-                            active: Event::Sync,
-                        });
-                    }
+                if let Some(phrase) = phrase.generate_active(&mut self.active, step, bias, drift, pads)? {
+                    self.active = Some(phrase);
                 }
             }
-            return Ok(Some(index));
+            self.next = (self.next + 1) % self.phrases.len();
         }
-        Ok(None)
+        Ok(())
     }
 }

@@ -66,7 +66,6 @@ pub struct Wav {
 pub struct Onset {
     pub wav: Wav,
     pub start: u64,
-    pub steps: u16,
 }
 
 #[derive(Clone)]
@@ -88,12 +87,53 @@ pub struct Phrase {
 }
 
 impl Phrase {
-    fn generate_stamped<const N: usize>(&self, active: &mut active::Event, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<Option<u16>> {
+    fn generate_active<const N: usize>(&self, active: &mut Option<active::Phrase>, step: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<Option<active::Phrase>> {
+        if let Some(active) = active.as_mut() {
+            if self.events.first().is_some_and(|v| v.step == 0) {
+                // phrase events start on first step
+                if let Some(event_rem) = self.generate_stamped(&mut active.active, 0, step, bias, drift, pads)? {
+                    active.next = 1;
+                    active.event_rem = event_rem;
+                    active.phrase_rem = self.len;
+                }
+            } else {
+                // phrase events start after first step
+                let event_rem = self.events.first().map(|v| v.step).unwrap_or(self.len);
+                active.active.trans(&Event::Sync, step, bias, pads)?;
+                active.next = 0;
+                active.event_rem = event_rem;
+                active.phrase_rem = self.len;
+            }
+        } else if self.events.first().is_some_and(|v| v.step == 0) {
+            // phrase events start on first step
+            let mut active = active::Event::Sync;
+            if let Some(event_rem) = self.generate_stamped(&mut active, 0, step, bias, drift, pads)? {
+                return Ok(Some(active::Phrase {
+                    next: 1,
+                    event_rem,
+                    phrase_rem: self.len,
+                    active,
+                }));
+            }
+        } else {
+            // phrase events start after first step
+            let event_rem = self.events.first().map(|v| v.step).unwrap_or(self.len);
+            return Ok(Some(active::Phrase {
+                next: 0,
+                event_rem,
+                phrase_rem: self.len,
+                active: active::Event::Sync,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn generate_stamped<const N: usize>(&self, active: &mut active::Event, index: usize, step: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<Option<u16>> {
         let drift = rand::random_range(0..=((drift * self.events.len() as f32 - 1.).round()) as usize);
-        let index = drift % self.events.len();
-        let Stamped { event, step } = &self.events[index];
-        let event_rem = self.events.get(index + 1).map(|v| v.step).unwrap_or(self.len) - step;
-        active.trans(event, bias, pads)?;
+        let index = (index + drift) % self.events.len();
+        let stamped = &self.events[index];
+        let event_rem = self.events.get(index + 1).map(|v| v.step).unwrap_or(self.len) - stamped.step;
+        active.trans(&stamped.event, step, bias, pads)?;
         Ok(Some(event_rem))
     }
 }
