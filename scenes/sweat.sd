@@ -1,0 +1,548 @@
+{
+  "kits": [
+    {
+      "inner": [
+        {
+          "onsets": [
+            {
+              "wav": {
+                "tempo": 461.14008,
+                "steps": 64,
+                "path": "onsets/cold sweat.wav",
+                "len": 799410
+              },
+              "start": 123904
+            },
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            {
+              "wav": {
+                "tempo": 461.14008,
+                "steps": 64,
+                "path": "onsets/cold sweat.wav",
+                "len": 799410
+              },
+              "start": 49664
+            },
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            {
+              "wav": {
+                "tempo": 461.14008,
+                "steps": 64,
+                "path": "onsets/cold sweat.wav",
+                "len": 799410
+              },
+              "start": 325888
+            },
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            {
+              "wav": {
+                "tempo": 461.14008,
+                "steps": 64,
+                "path": "onsets/cold sweat.wav",
+                "len": 799410
+              },
+              "start": 176384
+            },
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            {
+              "wav": {
+                "tempo": 461.14008,
+                "steps": 64,
+                "path": "onsets/cold sweat.wav",
+                "len": 799410
+              },
+              "start": 401152
+            },
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            {
+              "wav": {
+                "tempo": 461.14008,
+                "steps": 64,
+                "path": "onsets/cold sweat.wav",
+                "len": 799410
+              },
+              "start": 453632
+            },
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            {
+              "wav": {
+                "tempo": 461.14008,
+                "steps": 64,
+                "path": "onsets/cold sweat.wav",
+                "len": 799410
+              },
+              "start": 577536
+            },
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            {
+              "wav": {
+                "tempo": 461.14008,
+                "steps": 64,
+                "path": "onsets/cold sweat.wav",
+                "len": 799410
+              },
+              "start": 675840
+            },
+            null
+          ],
+          "phrase": null
+        }
+      ]
+    },
+    {
+      "inner": [
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        }
+      ]
+    },
+    {
+      "inner": [
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        }
+      ]
+    },
+    {
+      "inner": [
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        }
+      ]
+    },
+    {
+      "inner": [
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        }
+      ]
+    },
+    {
+      "inner": [
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        }
+      ]
+    },
+    {
+      "inner": [
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        }
+      ]
+    },
+    {
+      "inner": [
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        },
+        {
+          "onsets": [
+            null,
+            null
+          ],
+          "phrase": null
+        }
+      ]
+    }
+  ]
+}

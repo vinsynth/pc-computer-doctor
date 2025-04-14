@@ -3,44 +3,46 @@ use audio::PAD_COUNT;
 
 use color_eyre::Result;
 use midly::{live::LiveEvent, MidiMessage};
-use std::{
-    path::{Path, PathBuf},
-    sync::mpsc::Sender,
-};
+use std::{path::{Path, PathBuf}, sync::mpsc::Sender};
 
-const KEY_FS_DEC: u8 = 57;
-const KEY_FS_INTO: u8 = 58;
-const KEY_FS_INC: u8 = 59;
+enum KeyCode {
+    FsDec = 57,
+    FsInto = 58,
+    FsInc = 59,
+    Kit = 60,
+    Record = 62,
+    Pool = 63,
+    Hold = 64,
+    PadOffset = 65,
+}
 
-const KEY_RECORD: u8 = 60;
-const KEY_POOL: u8 = 62;
-const KEY_HOLD: u8 = 64;
-
-const PAD_OFFSET: u8 = 65;
-
-const CTRL_SPEED: u8 = 105;
-const CTRL_DRIFT: u8 = 106;
-const CTRL_BIAS: u8 = 29;
-const CTRL_WIDTH: u8 = 26;
+enum CtrlCode {
+    Speed = 105,
+    Drift = 106,
+    Bias = 29,
+    Width = 26,
+}
 
 enum State {
-    Pads,
-    Fs {
-        /// all paths in dir
+    LoadOnset,
+    LoadKit,
+    AssignKit,
+    LoadScene {
         paths: Vec<Box<Path>>,
-        /// current file index
-        index: usize,
+        file_index: usize,
+    },
+    LoadWav {
+        paths: Vec<Box<Path>>,
+        file_index: usize,
     },
     AssignOnset {
-        /// audio filepath
-        path: Box<Path>,
-        /// file index in parent dir
-        index: usize,
+        paths: Vec<Box<Path>>,
+        file_index: usize,
         rd: audio::Rd,
-        onset: usize,
+        onset_index: usize,
     },
     BakeRecord,
-    Pool(bool),
+    Pool { cleared: bool },
 }
 
 pub struct InputHandler {
@@ -52,23 +54,17 @@ pub struct InputHandler {
     downs: Vec<u8>,
     
     state: State,
-    pads_tx: Sender<audio::Cmd>,
+    pads_tx: Sender<audio::Cmd<PAD_COUNT>>,
     tui_tx: Sender<tui::Cmd>,
 }
 
-enum FsCmd {
-    Dec,
-    Inc,
-    Into,
-}
-
 impl InputHandler {
-    pub fn new(tui_tx: Sender<tui::Cmd>, pads_tx: Sender<audio::Cmd>) -> Result<Self> {
+    pub fn new(tui_tx: Sender<tui::Cmd>, pads_tx: Sender<audio::Cmd<PAD_COUNT>>) -> Result<Self> {
         Ok(Self {
             clock: 0,
             last_step: None,
             downs: Vec::new(),
-            state: State::Pads,
+            state: State::LoadOnset,
             alt: false,
             hold: false,
             pads_tx,
@@ -77,144 +73,326 @@ impl InputHandler {
     }
 
     pub fn push(&mut self, message: &[u8]) -> Result<()> {
+        macro_rules! to_fs_at {
+            ($paths:expr,$index:expr) => {
+                {
+                    let mut strings = [const { String::new() }; tui::FILE_COUNT];
+                    if !$paths.is_empty() {
+                        for i in 0..tui::FILE_COUNT {
+                            let index = ($index as isize + i as isize - tui::FILE_COUNT as isize / 2).rem_euclid($paths.len() as isize) as usize;
+                            strings[i] = $paths[index]
+                                .file_stem()
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .to_string();
+                        }
+                    }
+                    strings
+                }
+            }
+        }
         match LiveEvent::parse(message)? {
-            LiveEvent::Midi { message, .. } => {
-                match message {
-                    MidiMessage::NoteOff { key, .. } => match key.as_int() {
-                        KEY_RECORD => {
-                            // take record
-                            self.state = State::Pads;
-                            // FIXME: hold reversion for lower pool support via alt
-                            self.pads_tx.send(audio::Cmd::TakeRecord(self.downs.first().copied()))?;
-                            self.tui_tx.send(tui::Cmd::Clear)?;
-                        }
-                        KEY_POOL => {
-                            if let State::Pool(false) = self.state {
-                                self.pads_tx.send(audio::Cmd::ClearPool)?;
-                            }
-                            self.state = State::Pads;
-                            self.tui_tx.send(tui::Cmd::Clear)?;
-                        }
-                        KEY_HOLD => {
-                            self.alt = false;
-                            self.tui_tx.send(tui::Cmd::Alt(false))?;
-                        }
-                        key if (PAD_OFFSET..PAD_OFFSET + PAD_COUNT as u8).contains(&key) => {
-                            // handle_pad_up
-                            let index = key - PAD_OFFSET;
-                            self.downs.retain(|&v| v != index);
-                            self.tui_tx.send(tui::Cmd::Pad(index, false))?;
-                            match self.state {
-                                State::Pads | State::AssignOnset { .. } => if !self.hold {
-                                    self.handle_pad_input()?;
-                                }
-                                State::Fs { .. } => {
-                                    self.state = State::Pads;
-                                    self.tui_tx.send(tui::Cmd::Clear)?;
-                                    if !self.hold {
-                                        self.handle_pad_input()?;
-                                    }
-                                }
-                                _ => (),
-                            }
-                        }
-                        _ => (),
+            LiveEvent::Midi { message, .. } => match message {
+                MidiMessage::NoteOff { key, .. } => match key.as_int() {
+                    v if v == KeyCode::Kit as u8 => {
+                        self.state = State::LoadOnset;
+                        self.tui_tx.send(tui::Cmd::LoadOnset)?;
+                    },
+                    v if v == KeyCode::Record as u8 => {
+                        // take record
+                        self.state = State::LoadOnset;
+                        self.pads_tx.send(audio::Cmd::TakeRecord(self.downs.first().copied()))?;
+                        self.tui_tx.send(tui::Cmd::LoadOnset)?;
                     }
-                    MidiMessage::NoteOn { key, .. } => match key.as_int() {
-                        KEY_FS_DEC => self.handle_fs_event(FsCmd::Dec)?,
-                        KEY_FS_INTO => self.handle_fs_event(FsCmd::Into)?,
-                        KEY_FS_INC => self.handle_fs_event(FsCmd::Inc)?,
-                        KEY_RECORD => {
-                            // bake record over max len
-                            self.state = State::BakeRecord;
-                            self.pads_tx.send(audio::Cmd::BakeRecord(2u16.pow(PAD_COUNT as u32 - 1)))?;
-                            self.tui_tx.send(tui::Cmd::BakeRecord(None, 2u16.pow(PAD_COUNT as u32 - 1)))?;
+                    v if v == KeyCode::Pool as u8 => {
+                        if let State::Pool { cleared: false } = self.state {
+                            self.pads_tx.send(audio::Cmd::ClearPool)?;
                         }
-                        KEY_POOL => {
-                            self.state = State::Pool(false);
-                            self.tui_tx.send(tui::Cmd::Pool)?;
-                        }
-                        KEY_HOLD => {
-                            self.alt = true;
-                            self.tui_tx.send(tui::Cmd::Alt(true))?;
-                            self.hold = !self.hold;
-                            self.tui_tx.send(tui::Cmd::Hold(self.hold))?;
-                        }
-                        key if (PAD_OFFSET..PAD_OFFSET + PAD_COUNT as u8).contains(&key) => {
-                            // handle pad down
-                            let index = key - PAD_OFFSET;
-                            self.downs.push(index);
-                            self.tui_tx.send(tui::Cmd::Pad(index, true))?;
-                            match self.state {
-                                State::Pads => self.handle_pad_input()?,
-                                State::Fs { .. } => {
-                                    self.state = State::Pads;
-                                    self.tui_tx.send(tui::Cmd::Clear)?;
-                                    self.handle_pad_input()?;
-                                }
-                                State::AssignOnset { .. } => {
-                                    if let State::AssignOnset {
-                                        ref path,
-                                        ref rd,
-                                        ref onset,
-                                        ..
-                                    } = self.state {
-                                        let len = std::fs::metadata(path)?.len() - 44;
-                                        let start = rd.onsets[*onset];
-                                        let wav = audio::Wav {
-                                            rd: rd.clone(),
-                                            path: path.clone(),
-                                            len,
-                                        };
-                                        let onset = audio::Onset { wav, start };
-                                        self.pads_tx.send(audio::Cmd::AssignOnset(index, self.alt, onset))?;
-                                    }
-                                }
-                                State::BakeRecord { .. } => {
-                                    if self.downs.len() > 1 {
-                                        let index = self.downs[0];
-                                        let len = self.downs.iter().skip(1).map(|v| {
-                                            v.checked_sub(index + 1).unwrap_or(v + PAD_COUNT as u8 - 1 - index)
-                                        })
-                                        .fold(0u8, |acc, v| acc | (1 << v)) as u16;
-                                        self.pads_tx.send(audio::Cmd::BakeRecord(len))?;
-                                        self.tui_tx.send(tui::Cmd::BakeRecord(self.downs.first().copied(), len))?;
-                                    }
-                                }
-                                State::Pool(ref mut cleared) => {
-                                    if !*cleared {
-                                        *cleared = true;
-                                        self.pads_tx.send(audio::Cmd::ClearPool)?;
-                                    }
-                                    self.pads_tx.send(audio::Cmd::PushPool(index))?;
-                                }
+                        self.state = State::LoadOnset;
+                        self.tui_tx.send(tui::Cmd::LoadOnset)?;
+                    }
+                    v if v == KeyCode::Hold as u8 => {
+                        self.alt = false;
+                        self.tui_tx.send(tui::Cmd::Alt(false))?;
+                    }
+                    v if (KeyCode::PadOffset as u8..KeyCode::PadOffset as u8 + PAD_COUNT as u8).contains(&v) => {
+                        let index = v - KeyCode::PadOffset as u8;
+                        self.downs.retain(|&v| v != index);
+                        self.tui_tx.send(tui::Cmd::Pad(index, false))?;
+                        match self.state {
+                            State::LoadOnset => if !self.hold {
+                                self.handle_pad_input()?;
                             }
+                            State::AssignOnset { .. } => self.pads_tx.send(audio::Cmd::ForceSync)?,
+                            State::BakeRecord => {
+                                let len = if self.downs.len() > 1 {
+                                    let index = self.downs[0];
+                                    self.downs.iter().skip(1).map(|v| {
+                                        v.checked_sub(index + 1).unwrap_or(v + PAD_COUNT as u8 - 1 - index)
+                                    })
+                                    .fold(0u8, |acc, v| acc | (1 << v)) as u16
+                                } else {
+                                    audio::MAX_PHRASE_LEN
+                                };
+                                self.pads_tx.send(audio::Cmd::BakeRecord(len))?;
+                                self.tui_tx.send(tui::Cmd::BakeRecord(self.downs.first().copied(), len))?;
+                            }
+                            _ => (),
                         }
-                        _ => (),
-                    }
-                    MidiMessage::Controller { controller, value } => match controller.as_int() {
-                        CTRL_BIAS => {
-                            self.pads_tx.send(audio::Cmd::AssignBias(value.as_int() as f32 / 127.))?;
-                            self.tui_tx.send(tui::Cmd::AssignBias(value.as_int()))?;
-                        }
-                        CTRL_DRIFT => {
-                            self.pads_tx.send(audio::Cmd::AssignDrift(value.as_int() as f32 / 127.))?;
-                            self.tui_tx.send(tui::Cmd::AssignDrift(value.as_int()))?;
-                        }
-                        CTRL_SPEED => self.pads_tx.send(audio::Cmd::AssignSpeed(value.as_int() as f32 / 127. * 2.))?,
-                        CTRL_WIDTH => self.pads_tx.send(audio::Cmd::AssignWidth(value.as_int() as f32 / 127.))?,
-                        _ => (),
-                    }
-                    MidiMessage::PitchBend { bend } => {
-                        self.pads_tx.send(audio::Cmd::OffsetSpeed(bend.as_f32() + 1.))?;
                     }
                     _ => (),
                 }
-            }
-            LiveEvent::Realtime(midly::live::SystemRealtime::Start) => {
-                self.last_step = None;
-                self.clock = 0;
-                self.pads_tx.send(audio::Cmd::Start)?;
+                MidiMessage::NoteOn { key, .. } => match key.as_int() {
+                    v if v == KeyCode::FsDec as u8 => match &mut self.state {
+                        State::LoadScene { paths, file_index } => {
+                            *file_index = (*file_index as isize - 1).rem_euclid(paths.len() as isize) as usize;
+                            self.tui_tx.send(tui::Cmd::LoadScene(to_fs_at!(paths, *file_index)))?;
+                        }
+                        State::LoadWav { paths, file_index } => {
+                            *file_index = (*file_index as isize - 1).rem_euclid(paths.len() as isize) as usize;
+                            self.tui_tx.send(tui::Cmd::LoadWav(to_fs_at!(paths, *file_index)))?;
+                        }
+                        State::AssignOnset { paths, file_index, rd, onset_index } => {
+                            *onset_index = (*onset_index as isize - 1).rem_euclid(rd.onsets.len() as isize) as usize;
+                            let name = paths[*file_index].file_stem().unwrap().to_str().unwrap().to_string();
+                            self.tui_tx.send(tui::Cmd::AssignOnset { name, index: *onset_index, count: rd.onsets.len() })?;
+                        }
+                        _ => (),
+                    }
+                    v if v == KeyCode::FsInc as u8 => match &mut self.state {
+                        State::LoadScene { paths, file_index } => {
+                            *file_index = (*file_index as isize + 1).rem_euclid(paths.len() as isize) as usize;
+                            self.tui_tx.send(tui::Cmd::LoadScene(to_fs_at!(paths, *file_index)))?;
+                        }
+                        State::LoadWav { paths, file_index } => {
+                            *file_index = (*file_index as isize + 1).rem_euclid(paths.len() as isize) as usize;
+                            self.tui_tx.send(tui::Cmd::LoadWav(to_fs_at!(paths, *file_index)))?;
+                        }
+                        State::AssignOnset { paths, file_index, rd, onset_index } => {
+                            *onset_index = (*onset_index as isize + 1).rem_euclid(rd.onsets.len() as isize) as usize;
+                            let name = paths[*file_index].file_stem().unwrap().to_str().unwrap().to_string();
+                            self.tui_tx.send(tui::Cmd::AssignOnset { name, index: *onset_index, count: rd.onsets.len() })?;
+                        }
+                        _ => (),
+                    }
+                    v if v == KeyCode::FsInto as u8 => {
+                        match &self.state {
+                            State::LoadKit => {
+                                let paths = (std::fs::read_dir("scenes")?.flat_map(|v| Some(v.ok()?.path().into_boxed_path()))).collect::<Vec<_>>();
+                                self.tui_tx.send(tui::Cmd::LoadScene(to_fs_at!(paths, 0)))?;
+                                self.state = State::LoadScene {
+                                    paths,
+                                    file_index: 0,
+                                };
+                            }
+                            State::LoadScene { paths, file_index } => {
+                                if paths.is_empty() {
+                                    self.state = State::LoadOnset;
+                                    self.tui_tx.send(tui::Cmd::LoadOnset)?;
+                                } else {
+                                    let path = &paths[*file_index];
+                                    if path.is_dir() {
+                                        let mut paths = if path.parent().unwrap() == PathBuf::from("") {
+                                            // in ./scenes; don't include ".."
+                                            Vec::new()
+                                        } else {
+                                            // in subdirectory; include ".."
+                                            vec![path.parent().unwrap().into()]
+                                        };
+                                        paths.extend(std::fs::read_dir(path)?.flat_map(|v| Some(v.ok()?.path().into_boxed_path())));
+                                        self.tui_tx.send(tui::Cmd::LoadScene(to_fs_at!(paths, 0)))?;
+                                        self.state = State::LoadScene { paths, file_index: 0 };
+                                    } else {
+                                        let sd_string = std::fs::read_to_string(&paths[*file_index])?;
+                                        let scene: audio::pads::Scene<PAD_COUNT> = serde_json::from_str(&sd_string)?;
+                                        let tui_scene: [[tui::Pad; PAD_COUNT]; PAD_COUNT] = core::array::from_fn(|i| {
+                                            core::array::from_fn(|j| {
+                                                let pad = &scene.kits[i].inner[j];
+                                                tui::Pad {
+                                                    onsets: [pad.onsets[0].is_some(), pad.onsets[1].is_some()],
+                                                    phrase: pad.phrase.is_some(),
+                                                }
+                                            })
+                                        });
+                                        self.tui_tx.send(tui::Cmd::AssignScene(Box::new(tui_scene)))?;
+                                        self.pads_tx.send(audio::Cmd::LoadScene(Box::new(scene)))?;
+                                    }
+                                }
+                            }
+                            State::LoadWav { paths, file_index } => {
+                                if paths.is_empty() {
+                                    self.state = State::LoadOnset;
+                                    self.tui_tx.send(tui::Cmd::LoadOnset)?;
+                                } else {
+                                    let path = &paths[*file_index];
+                                    if path.is_dir() {
+                                        let mut paths = if path.parent().unwrap() == PathBuf::from("") {
+                                            // in ./onsets; don't include ".."
+                                            Vec::new()
+                                        } else {
+                                            // in subdirectory; include ".."
+                                            vec![path.parent().unwrap().into()]
+                                        };
+                                        paths.extend(std::fs::read_dir(path)?.flat_map(|v| Some(v.ok()?.path().into_boxed_path())));
+                                        self.tui_tx.send(tui::Cmd::LoadWav(to_fs_at!(paths, 0)))?;
+                                        self.state = State::LoadWav { paths, file_index: 0 };
+                                    } else {
+                                        let rd_string = std::fs::read_to_string(path.with_extension("rd"))?;
+                                        let rd: audio::Rd = serde_json::from_str(&rd_string)?;
+                                        let name = path.file_stem().unwrap().to_str().unwrap().to_string();
+                                        self.tui_tx.send(tui::Cmd::AssignOnset { name, index: 0, count: rd.onsets.len() })?;
+                                        self.state = State::AssignOnset {
+                                            paths: paths.clone(),
+                                            file_index: *file_index,
+                                            rd,
+                                            onset_index: 0,
+                                        };
+                                    }
+                                }
+                            }
+                            State::AssignOnset { paths, file_index, .. } => {
+                                self.tui_tx.send(tui::Cmd::LoadWav(to_fs_at!(paths, *file_index)))?;
+                                self.state = State::LoadWav { paths: paths.clone(), file_index: 0 };
+                            }
+                            _ => {
+                                let paths = (std::fs::read_dir("onsets")?.flat_map(|v| Some(v.ok()?.path().into_boxed_path()))).collect::<Vec<_>>();
+                                self.tui_tx.send(tui::Cmd::LoadWav(to_fs_at!(paths, 0)))?;
+                                self.state = State::LoadWav {
+                                    paths,
+                                    file_index: 0,
+                                };
+                            }
+                        }
+                    }
+                    v if v == KeyCode::Kit as u8 => {
+                        self.state = State::LoadKit;
+                        self.tui_tx.send(tui::Cmd::LoadKit(None))?;
+                    }
+                    v if v == KeyCode::Record as u8 => {
+                        match self.state {
+                            State::LoadKit => {
+                                self.state = State::AssignKit;
+                                self.tui_tx.send(tui::Cmd::AssignKit(None))?;
+                            }
+                            _ => {
+                                self.state = State::BakeRecord;
+                                self.hold = false;
+                                if self.downs.is_empty() {
+                                    self.pads_tx.send(audio::Cmd::Input(audio::Event::Sync))?;
+                                }
+                                self.pads_tx.send(audio::Cmd::BakeRecord(audio::MAX_PHRASE_LEN))?;
+                                self.tui_tx.send(tui::Cmd::BakeRecord(None, audio::MAX_PHRASE_LEN))?;
+                            }
+                        }
+                    }
+                    v if v == KeyCode::Pool as u8 => {
+                        match self.state {
+                            State::LoadKit => {
+                                let mut index = 0;
+                                let mut file = std::fs::File::create_new(format!("scenes/scene{}.sd", index));
+                                while file.is_err() {
+                                    index += 1;
+                                    file = std::fs::File::create_new(format!("scenes/scene{}.sd", index));
+                                }
+                                self.pads_tx.send(audio::Cmd::SaveScene(file?))?;
+                            }
+                            _ => {
+                                self.state = State::Pool { cleared: false };
+                                self.tui_tx.send(tui::Cmd::Pool)?;
+                            }
+                        }
+                    }
+                    v if v == KeyCode::Hold as u8 => {
+                        if let State::LoadOnset = self.state {
+                            self.hold = !self.hold;
+                            if !self.hold && self.downs.is_empty() {
+                                self.pads_tx.send(audio::Cmd::Input(audio::Event::Sync))?;
+                            }
+                            self.tui_tx.send(tui::Cmd::Hold(self.hold))?;
+                        }
+                        self.alt = true;
+                        self.tui_tx.send(tui::Cmd::Alt(true))?;
+                    }
+                    v if (KeyCode::PadOffset as u8..KeyCode::PadOffset as u8 + PAD_COUNT as u8).contains(&v) => {
+                        let index = v - KeyCode::PadOffset as u8;
+                        self.downs.push(index);
+                        self.tui_tx.send(tui::Cmd::Pad(index, true))?;
+                        match &self.state {
+                            State::LoadOnset => self.handle_pad_input()?,
+                            State::LoadKit => {
+                                self.pads_tx.send(audio::Cmd::LoadKit(index))?;
+                                self.tui_tx.send(tui::Cmd::LoadKit(Some(index)))?;
+                            }
+                            State::AssignKit => {
+                                self.pads_tx.send(audio::Cmd::AssignKit(index))?;
+                                self.tui_tx.send(tui::Cmd::AssignKit(Some(index)))?;
+                            }
+                            State::LoadScene { .. } => {
+                                self.state = State::LoadOnset;
+                                self.tui_tx.send(tui::Cmd::LoadOnset)?;
+                            }
+                            State::LoadWav { .. } => {
+                                self.state = State::LoadOnset;
+                                self.tui_tx.send(tui::Cmd::LoadOnset)?;
+                            }
+                            State::AssignOnset { paths, file_index, rd, onset_index } => {
+                                let len = std::fs::metadata(&paths[*file_index])?.len() - 44;
+                                let start = rd.onsets[*onset_index];
+                                let wav = audio::Wav {
+                                    tempo: rd.tempo,
+                                    steps: rd.steps,
+                                    path: paths[*file_index].clone(),
+                                    len,
+                                };
+                                let onset = audio::Onset { wav, start };
+                                self.pads_tx.send(audio::Cmd::AssignOnset(index, self.alt, Box::new(onset)))?;
+                            }
+                            State::BakeRecord => {
+                                let len = if self.downs.len() > 1 {
+                                    let index = self.downs[0];
+                                    self.downs.iter().skip(1).map(|v| {
+                                        v.checked_sub(index + 1).unwrap_or(v + PAD_COUNT as u8 - 1 - index)
+                                    })
+                                    .fold(0u8, |acc, v| acc | (1 << v)) as u16
+                                } else {
+                                    audio::MAX_PHRASE_LEN
+                                };
+                                self.pads_tx.send(audio::Cmd::BakeRecord(len))?;
+                                self.tui_tx.send(tui::Cmd::BakeRecord(self.downs.first().copied(), len))?;
+                            }
+                            State::Pool { cleared } => {
+                                if !cleared {
+                                    self.state = State::Pool { cleared: true };
+                                    self.pads_tx.send(audio::Cmd::ClearPool)?;
+                                }
+                                self.pads_tx.send(audio::Cmd::PushPool(index))?;
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+                MidiMessage::Controller { controller, value } => match controller.as_int() {
+                    v if v == CtrlCode::Speed as u8 => {
+                        self.pads_tx.send(audio::Cmd::AssignSpeed(value.as_int() as f32 / 127. * 2.))?;
+                    }
+                    v if v == CtrlCode::Drift as u8 => {
+                        self.pads_tx.send(audio::Cmd::AssignDrift(value.as_int() as f32 / 127.))?;
+                        self.tui_tx.send(tui::Cmd::AssignDrift(value.as_int()))?;
+                    }
+                    v if v == CtrlCode::Bias as u8 => {
+                        self.pads_tx.send(audio::Cmd::AssignBias(value.as_int() as f32 / 127.))?;
+                        self.tui_tx.send(tui::Cmd::AssignBias(value.as_int()))?;
+                    }
+                    v if v == CtrlCode::Width as u8 => {
+                        self.pads_tx.send(audio::Cmd::AssignWidth(value.as_int() as f32 / 127.))?;
+                    }
+                    _ => (),
+                }
+                MidiMessage::PitchBend { bend } => {
+                    self.pads_tx.send(audio::Cmd::OffsetSpeed(bend.as_f32() + 1.))?;
+                }
+                _ => (),
             }
             LiveEvent::Realtime(midly::live::SystemRealtime::TimingClock) => {
                 if self.clock == 0 {
@@ -232,6 +410,7 @@ impl InputHandler {
             }
             LiveEvent::Realtime(midly::live::SystemRealtime::Stop) => {
                 self.last_step = None;
+                self.clock = 0;
                 self.pads_tx.send(audio::Cmd::Stop)?;
                 self.tui_tx.send(tui::Cmd::Stop)?;
             }
@@ -257,122 +436,6 @@ impl InputHandler {
         } else {
             // init sync
             self.pads_tx.send(audio::Cmd::Input(audio::Event::Sync))?;
-        }
-        Ok(())
-    }
-
-    fn handle_fs_event(&mut self, cmd: FsCmd) -> Result<()> {
-        macro_rules! send_fs {
-            ($dir:expr,$index:expr) => {
-                {
-                    // FIXME: check both rd and wav exist, or handle when wav only
-                    let mut paths = std::fs::read_dir($dir)?
-                        .flat_map(|v| Some(v.ok()?.path().into_boxed_path()))
-                        .filter(|v| v.extension().unwrap() == "wav" || v.is_dir())
-                        .collect::<Vec<_>>();
-                    paths.sort();
-                    resend_fs!(paths, $index);
-                    paths
-                }
-            }
-        }
-        macro_rules! resend_fs {
-            ($paths:expr,$index:expr) => {
-                if $paths.is_empty() {
-                    self.tui_tx.send(tui::Cmd::Fs(None))?;
-                } else {
-                    let mut strings = [const { String::new() }; tui::FILE_COUNT];
-                    for i in 0..tui::FILE_COUNT {
-                        let index = ($index as isize + i as isize - tui::FILE_COUNT as isize / 2).rem_euclid($paths.len() as isize) as usize;
-                        strings[i] = $paths[index]
-                            .file_stem()
-                            .unwrap()
-                            .to_str()
-                            .unwrap()
-                            .to_string();
-                    }
-                    self.tui_tx.send(tui::Cmd::Fs(Some(strings)))?;
-                }
-            }
-        }
-        if let State::Fs { ref mut paths, ref mut index } = self.state {
-            match cmd {
-                FsCmd::Dec => {
-                    *index = (*index as isize - 1).rem_euclid(paths.len() as isize) as usize;
-                    resend_fs!(paths, *index);
-                }
-                FsCmd::Inc => {
-                    *index = (*index as isize + 1).rem_euclid(paths.len() as isize) as usize;
-                    resend_fs!(paths, *index);
-                }
-                FsCmd::Into => {
-                    if !paths.is_empty() {
-                        let path = paths[*index].clone();
-                        if path.is_dir() {
-                            // into dir (maybe parent)
-                            *paths = if path.parent().unwrap() == PathBuf::from("") {
-                                // in assets; don't include ".."
-                                Vec::new()
-                            } else {
-                                // in subdirectory; include ".."
-                                vec![path.parent().unwrap().into()]
-                            };
-                            paths.extend(send_fs!(path, 0));
-                            *index = 0;
-                        } else {
-                            // into audio file
-                            let rd_string = std::fs::read_to_string(path.with_extension("rd"))?;
-                            let rd: audio::Rd = miniserde::json::from_str(&rd_string)?;
-                            let name = path.file_stem().unwrap().to_str().unwrap().to_string();
-                            self.tui_tx.send(tui::Cmd::AssignOnset {
-                                name,
-                                index: 1,
-                                count: rd.onsets.len(),
-                            })?;
-                            // treat hold as alt while AssignOnset
-                            self.hold = false;
-                            self.tui_tx.send(tui::Cmd::Hold(false))?;
-                            self.state = State::AssignOnset {
-                                path,
-                                index: *index,
-                                rd,
-                                onset: 0,
-                            };
-                        }
-                    }
-                }
-            }
-        } else if let State::AssignOnset { ref path, ref mut rd, index, ref mut onset } = self.state {
-            match cmd {
-                FsCmd::Dec => {
-                    *onset = (*onset as isize - 1).rem_euclid(rd.onsets.len() as isize) as usize;
-                    let name = path.file_stem().unwrap().to_str().unwrap().to_string();
-                    self.tui_tx.send(tui::Cmd::AssignOnset {
-                        name,
-                        index: *onset + 1,
-                        count: rd.onsets.len(),
-                    })?;
-                }
-                FsCmd::Inc => {
-                    *onset = (*onset + 1).rem_euclid(rd.onsets.len());
-                    let name = path.file_stem().unwrap().to_str().unwrap().to_string();
-                    self.tui_tx.send(tui::Cmd::AssignOnset {
-                        name,
-                        index: *onset + 1,
-                        count: rd.onsets.len(),
-                    })?;
-                }
-                FsCmd::Into => {
-                    let paths = send_fs!(path.parent().unwrap(), index);
-                    self.state = State::Fs {
-                        paths,
-                        index,
-                    }
-                }
-            }
-        } else {
-            let paths = send_fs!("assets", 0);
-            self.state = State::Fs { paths, index: 0 };
         }
         Ok(())
     }

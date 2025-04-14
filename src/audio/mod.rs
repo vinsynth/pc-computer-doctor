@@ -8,27 +8,34 @@ pub const GRAIN_LEN: usize = 1024;
 pub const PPQ: u8 = 24;
 pub const STEP_DIV: u8 = 4;
 pub const LOOP_DIV: u8 = 8;
-pub const MAX_PHRASE_LEN: u16 = 2u16.pow(PAD_COUNT as u32 - 1) - 1;
+pub const MAX_PHRASE_LEN: u16 = 2u16.pow(PAD_COUNT as u32 - 1);
 
-pub enum Cmd {
-    Start,
+pub enum Cmd<const N: usize> {
     Clock,
     Stop,
     AssignTempo(f32),
-    AssignBias(f32),
-    AssignDrift(f32),
+
     AssignSpeed(f32),
     OffsetSpeed(f32),
+    AssignDrift(f32),
+    AssignBias(f32),
     AssignWidth(f32),
-    AssignOnset(u8, bool, Onset),
+
+    AssignKit(u8),
+    LoadKit(u8),
+    SaveScene(std::fs::File),
+    LoadScene(Box<pads::Scene<N>>),
+
+    AssignOnset(u8, bool, Box<Onset>),
+    ForceSync,
     Input(Event),
-    BakeRecord(u16),
     TakeRecord(Option<u8>),
-    PushPool(u8),
+    BakeRecord(u16),
     ClearPool,
+    PushPool(u8),
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Fraction {
     numerator: u8,
     denominator: u8,
@@ -49,38 +56,42 @@ impl From<Fraction> for f32 {
     }
 }
 
-#[derive(Clone, miniserde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Rd {
     pub tempo: Option<f32>,
     pub steps: u16,
     pub onsets: Vec<u64>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Wav {
-    pub rd: Rd,
+    pub tempo: Option<f32>,
+    pub steps: u16,
     pub path: Box<std::path::Path>,
     /// pcm length in bytes
     pub len: u64,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Onset {
     pub wav: Wav,
     pub start: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     Sync,
     Hold { index: u8 },
     Loop { index: u8, len: Fraction },
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Stamped {
     event: Event,
     step: u16,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Phrase {
     events: Vec<Stamped>,
     len: u16,

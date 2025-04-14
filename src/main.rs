@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     color_eyre::install()?;
 
     let (input_tui_tx, input_tui_rx) = std::sync::mpsc::channel::<tui::Cmd>();
-    let (input_pads_tx, input_pads_rx) = std::sync::mpsc::channel::<audio::Cmd>();
+    let (input_pads_tx, input_pads_rx) = std::sync::mpsc::channel::<audio::Cmd<{audio::PAD_COUNT}>>();
 
     let hosts = cpal::available_hosts();
     let id = match hosts.len() {

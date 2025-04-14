@@ -1,22 +1,24 @@
 use super::active;
 
-use std::{fs::File, io::Read};
+use std::{fs::File, io::{Read, Write}};
 use cpal::{FromSample, SizedSample};
 use color_eyre::Result;
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Pad {
     pub onsets: [Option<super::Onset>; 2],
     pub phrase: Option<super::Phrase>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pads<const N: usize> {
+    #[serde(with = "serde_arrays")]
     pub inner: [Pad; N],
 }
 
 impl<const N: usize> Pads<N> {
     pub fn generate_pan(index: impl Into<usize>) -> f32 {
-        index.into() as f32 / super::PAD_COUNT as f32 - 0.5
+        index.into() as f32 / N as f32 - 0.5
     }
 
     pub fn new() -> Self {
@@ -31,8 +33,8 @@ impl<const N: usize> Pads<N> {
     ) -> Result<active::Onset, std::io::Error> {
         let super::Onset { wav, start, .. } = self.inner[index.into()].onsets[alt as usize].as_ref().unwrap();
         let wav = active::Wav {
-            tempo: wav.rd.tempo,
-            steps: wav.rd.steps,
+            tempo: wav.tempo,
+            steps: wav.steps,
             file: File::open(wav.path.clone())?,
             len: wav.len,
         };
@@ -52,8 +54,8 @@ impl<const N: usize> Pads<N> {
     ) -> Result<active::Onset, std::io::Error> {
         let super::Onset { wav, start, .. } = self.inner[index.into()].onsets[alt as usize].as_ref().unwrap();
         let mut wav = active::Wav {
-            tempo: wav.rd.tempo,
-            steps: wav.rd.steps,
+            tempo: wav.tempo,
+            steps: wav.steps,
             file: File::open(wav.path.clone())?,
             len: wav.len,
         };
@@ -73,6 +75,18 @@ impl<const N: usize> Pads<N> {
             [None, Some(_)] => Some(true),
             [Some(_), Some(_)] => Some(rand::random_bool(bias as f64)),
         }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Scene<const N: usize> {
+    #[serde(with = "serde_arrays")]
+    pub kits: [Pads<N>; N],
+}
+
+impl<const N: usize> Scene<N> {
+    pub fn new() -> Self {
+        Self { kits: core::array::from_fn(|_| Pads::<N>::new()) }
     }
 }
 
@@ -101,13 +115,14 @@ pub struct PadsHandler<const N: usize> {
     speed: Mod<f32>,
     width: f32,
 
+    scene: Scene<N>,
     pads: Pads<N>,
     input: active::Input,
     record: active::Record,
     // FIXME: second phrsae field for lower pool
     pool: active::Pool,
 
-    cmd_rx: std::sync::mpsc::Receiver<super::Cmd>,
+    cmd_rx: std::sync::mpsc::Receiver<super::Cmd<N>>,
 }
 
 impl<const N: usize> PadsHandler<N> {
@@ -167,7 +182,7 @@ impl<const N: usize> PadsHandler<N> {
         Ok(())
     }
 
-    pub fn new(cmd_rx: std::sync::mpsc::Receiver<super::Cmd>) -> Self {
+    pub fn new(cmd_rx: std::sync::mpsc::Receiver<super::Cmd<N>>) -> Self {
         Self {
             quant: false,
             clock: 0.,
@@ -178,6 +193,7 @@ impl<const N: usize> PadsHandler<N> {
             speed: Mod::new(1., 1.),
             width: 1.,
 
+            scene: Scene::new(),
             pads: Pads::new(),
             input: active::Input::new(),
             record: active::Record::new(),
@@ -193,21 +209,28 @@ impl<const N: usize> PadsHandler<N> {
     {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             match cmd {
-                super::Cmd::Start => self.start(),
                 super::Cmd::Clock => self.clock()?,
                 super::Cmd::Stop => self.stop(),
                 super::Cmd::AssignTempo(v) => self.assign_tempo(v),
-                super::Cmd::AssignBias(v) => self.assign_bias(v),
-                super::Cmd::AssignDrift(v) => self.assign_drift(v),
+
                 super::Cmd::AssignSpeed(v) => self.assign_speed(v),
                 super::Cmd::OffsetSpeed(v) => self.offset_speed(v),
+                super::Cmd::AssignDrift(v) => self.assign_drift(v),
+                super::Cmd::AssignBias(v) => self.assign_bias(v),
                 super::Cmd::AssignWidth(v) => self.assign_width(v),
-                super::Cmd::AssignOnset(index, alt, onset) => self.assign_onset(index, alt, onset)?,
+
+                super::Cmd::AssignKit(index) => self.assign_kit(index),
+                super::Cmd::LoadKit(index) => self.load_kit(index),
+                super::Cmd::SaveScene(file) => self.save_scene(file)?,
+                super::Cmd::LoadScene(scene) => self.load_scene(*scene),
+
+                super::Cmd::AssignOnset(index, alt, onset) => self.assign_onset(index, alt, *onset)?,
+                super::Cmd::ForceSync => self.force_sync()?,
                 super::Cmd::Input(event) => self.input(event)?,
-                super::Cmd::BakeRecord(len) => self.bake_record(len)?,
                 super::Cmd::TakeRecord(index) => self.take_record(index),
-                super::Cmd::PushPool(index) => self.push_pool(index),
+                super::Cmd::BakeRecord(len) => self.bake_record(len)?,
                 super::Cmd::ClearPool => self.clear_pool(),
+                super::Cmd::PushPool(index) => self.push_pool(index),
             }
         }
         self.handle_read(buffer, channels)?;
@@ -243,11 +266,6 @@ impl<const N: usize> PadsHandler<N> {
         }
         buffer.fill(T::EQUILIBRIUM);
         Ok(())
-    }
-
-    fn start(&mut self) {
-        self.quant = true;
-        self.clock = 0.;
     }
 
     fn clock(&mut self) -> Result<()> {
@@ -315,9 +333,32 @@ impl<const N: usize> PadsHandler<N> {
         self.width = width;
     }
 
+    fn assign_kit(&mut self, index: u8) {
+        self.scene.kits[index as usize] = self.pads.clone();
+    }
+
+    fn load_kit(&mut self, index: u8) {
+        self.pads = self.scene.kits[index as usize].clone();
+    }
+
+    fn save_scene(&mut self, mut file: std::fs::File) -> Result<()> {
+        let json = serde_json::to_string_pretty(&self.scene)?;
+        write!(file, "{}", json)?;
+        Ok(())
+    }
+
+    fn load_scene(&mut self, scene: Scene<N>) {
+        self.scene = scene;
+    }
+
     fn assign_onset(&mut self, index: u8, alt: bool, onset: super::Onset) -> Result<()> {
         self.pads.inner[index as usize].onsets[alt as usize] = Some(onset);
         self.input.active.trans(&super::Event::Hold { index }, self.clock as u16, self.bias, &self.pads)?;
+        Ok(())
+    }
+
+    fn force_sync(&mut self) -> Result<()> {
+        self.input.active.trans(&super::Event::Sync, self.clock as u16, self.bias, &self.pads)?;
         Ok(())
     }
 
@@ -327,15 +368,6 @@ impl<const N: usize> PadsHandler<N> {
         } else {
             self.process_input(event)?;
         }
-        Ok(())
-    }
-
-    fn bake_record(&mut self, len: u16) -> Result<()> {
-        if self.record.active.is_none() {
-            self.record.bake(self.clock as u16);
-        }
-        self.record.trim(len);
-        self.record.generate_phrase(self.clock as u16, self.bias, self.drift, &self.pads)?;
         Ok(())
     }
 
@@ -351,8 +383,13 @@ impl<const N: usize> PadsHandler<N> {
         }
     }
 
-    fn push_pool(&mut self, index: u8) {
-        self.pool.phrases.push(index);
+    fn bake_record(&mut self, len: u16) -> Result<()> {
+        if self.record.active.is_none() {
+            self.record.bake(self.clock as u16);
+        }
+        self.record.trim(len);
+        self.record.generate_phrase(self.clock as u16, self.bias, self.drift, &self.pads)?;
+        Ok(())
     }
 
     fn clear_pool(&mut self) {
@@ -361,6 +398,10 @@ impl<const N: usize> PadsHandler<N> {
         if let Some(active) = self.pool.active.as_mut() {
             active.phrase_rem = 0;
         }
+    }
+
+    fn push_pool(&mut self, index: u8) {
+        self.pool.phrases.push(index);
     }
 
     fn process_input(&mut self, event: super::Event) -> Result<()> {
