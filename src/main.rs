@@ -107,18 +107,18 @@ fn main() -> Result<()> {
 
     let audio_handle = std::thread::spawn(move || -> Result<()> {
         let config = device.default_output_config().unwrap();
-        let pads = audio::pads::PadsHandler::<{audio::PAD_COUNT}>::new(input_pads_rx);
+        let handler = audio::pads::AudioHandler::<{audio::PAD_COUNT}>::new(input_pads_rx);
 
         match config.sample_format() {
-            cpal::SampleFormat::I16 => play::<i16>(&device, &config.into(), pads)?,
-            cpal::SampleFormat::F32 => play::<f32>(&device, &config.into(), pads)?,
+            cpal::SampleFormat::I16 => play::<i16>(&device, &config.into(), handler)?,
+            cpal::SampleFormat::F32 => play::<f32>(&device, &config.into(), handler)?,
             sample_format => panic!("unsupported sample format: {}", sample_format),
         }
         Ok(())
     });
 
     let mut terminal = ratatui::init();
-    tui::Tui::default().run(&mut terminal, input_tui_rx)?;
+    tui::TuiHandler::default().run(&mut terminal, input_tui_rx)?;
     ratatui::restore();
 
     // pads thread completes once audio_tx held by input_handler dropped in _in_connection thread
@@ -133,7 +133,7 @@ fn main() -> Result<()> {
 fn play<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    mut pads: audio::pads::PadsHandler<{audio::PAD_COUNT}>,
+    mut handler: audio::pads::AudioHandler<{audio::PAD_COUNT}>,
 ) -> Result<()>
 where
     T: SizedSample + FromSample<f32>,
@@ -141,7 +141,7 @@ where
     let channels = config.channels as usize;
 
     let out_fn = move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-        pads.tick(data, channels).unwrap();
+        handler.tick(data, channels).unwrap();
     };
     let err_fn = |_| {};
     let stream = device.build_output_stream(config, out_fn, err_fn, None)?;

@@ -128,56 +128,120 @@
       "inner": [
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 545.6337,
+                "steps": 64,
+                "path": "onsets/tighten up.wav",
+                "len": 675618
+              },
+              "start": 0
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 545.6337,
+                "steps": 64,
+                "path": "onsets/tighten up.wav",
+                "len": 675618
+              },
+              "start": 43776
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 545.6337,
+                "steps": 64,
+                "path": "onsets/tighten up.wav",
+                "len": 675618
+              },
+              "start": 192256
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 545.6337,
+                "steps": 64,
+                "path": "onsets/tighten up.wav",
+                "len": 675618
+              },
+              "start": 167936
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 545.6337,
+                "steps": 64,
+                "path": "onsets/tighten up.wav",
+                "len": 675618
+              },
+              "start": 338432
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 545.6337,
+                "steps": 64,
+                "path": "onsets/tighten up.wav",
+                "len": 675618
+              },
+              "start": 317184
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 545.6337,
+                "steps": 64,
+                "path": "onsets/tighten up.wav",
+                "len": 675618
+              },
+              "start": 428800
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 545.6337,
+                "steps": 64,
+                "path": "onsets/tighten up.wav",
+                "len": 675618
+              },
+              "start": 635392
+            },
             null
           ],
           "phrase": null
@@ -188,56 +252,120 @@
       "inner": [
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 551.8249,
+                "steps": 64,
+                "path": "onsets/amen48mono.wav",
+                "len": 668038
+              },
+              "start": 0
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 551.8249,
+                "steps": 64,
+                "path": "onsets/amen48mono.wav",
+                "len": 668038
+              },
+              "start": 42240
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 551.8249,
+                "steps": 64,
+                "path": "onsets/amen48mono.wav",
+                "len": 668038
+              },
+              "start": 168704
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 551.8249,
+                "steps": 64,
+                "path": "onsets/amen48mono.wav",
+                "len": 668038
+              },
+              "start": 60672
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 551.8249,
+                "steps": 64,
+                "path": "onsets/amen48mono.wav",
+                "len": 668038
+              },
+              "start": 336384
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 551.8249,
+                "steps": 64,
+                "path": "onsets/amen48mono.wav",
+                "len": 668038
+              },
+              "start": 293888
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 551.8249,
+                "steps": 64,
+                "path": "onsets/amen48mono.wav",
+                "len": 668038
+              },
+              "start": 516352
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": 551.8249,
+                "steps": 64,
+                "path": "onsets/amen48mono.wav",
+                "len": 668038
+              },
+              "start": 606976
+            },
             null
           ],
           "phrase": null
@@ -248,14 +376,30 @@
       "inner": [
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": null,
+                "steps": 12,
+                "path": "onsets/time drizzled on.wav",
+                "len": 1464696
+              },
+              "start": 0
+            },
             null
           ],
           "phrase": null
         },
         {
           "onsets": [
-            null,
+            {
+              "wav": {
+                "tempo": null,
+                "steps": 14,
+                "path": "onsets/hahahaha.wav",
+                "len": 180414
+              },
+              "start": 0
+            },
             null
           ],
           "phrase": null

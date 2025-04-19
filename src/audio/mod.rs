@@ -1,3 +1,4 @@
+use crate::input::Bank;
 use color_eyre::Result;
 
 pub mod pads;
@@ -14,21 +15,25 @@ pub enum Cmd<const N: usize> {
     Clock,
     Stop,
     AssignTempo(f32),
-
-    AssignSpeed(f32),
+    AssignBlend(f32),
     OffsetSpeed(f32),
+    SaveScene(std::fs::File),
+    LoadScene(Box<pads::Scene<N>>),
+    Bank(Bank, BankCmd),
+}
+
+pub enum BankCmd {
+    AssignSpeed(f32),
     AssignDrift(f32),
     AssignBias(f32),
     AssignWidth(f32),
 
     AssignKit(u8),
     LoadKit(u8),
-    SaveScene(std::fs::File),
-    LoadScene(Box<pads::Scene<N>>),
-
     AssignOnset(u8, bool, Box<Onset>),
-    ForceSync,
-    Input(Event),
+
+    ForceEvent(Event),
+    PushEvent(Event),
     TakeRecord(Option<u8>),
     BakeRecord(u16),
     ClearPool,
@@ -56,7 +61,7 @@ impl From<Fraction> for f32 {
     }
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct Rd {
     pub tempo: Option<f32>,
     pub steps: u16,
