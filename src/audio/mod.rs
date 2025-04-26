@@ -5,6 +5,7 @@ pub mod pads;
 pub mod active;
 
 pub const PAD_COUNT: usize = 8;
+pub const SAMPLE_RATE: u16 = 48000;
 pub const GRAIN_LEN: usize = 1024;
 pub const PPQ: u8 = 24;
 pub const STEP_DIV: u8 = 4;
@@ -27,6 +28,7 @@ pub enum BankCmd {
     AssignDrift(f32),
     AssignBias(f32),
     AssignWidth(f32),
+    AssignReverse(bool),
 
     AssignKit(u8),
     LoadKit(u8),
@@ -64,14 +66,14 @@ impl From<Fraction> for f32 {
 #[derive(Clone, serde::Deserialize)]
 pub struct Rd {
     pub tempo: Option<f32>,
-    pub steps: u16,
+    pub steps: Option<u16>,
     pub onsets: Vec<u64>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Wav {
     pub tempo: Option<f32>,
-    pub steps: u16,
+    pub steps: Option<u16>,
     pub path: Box<std::path::Path>,
     /// pcm length in bytes
     pub len: u64,
@@ -103,7 +105,7 @@ pub struct Phrase {
 }
 
 impl Phrase {
-    fn generate_active<const N: usize>(&self, active: &mut Option<active::Phrase>, step: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<Option<active::Phrase>> {
+    fn generate_active<const N: usize>(&self, active: &mut Option<active::Phrase>, step: u16, bias: f32, drift: f32, pads: &pads::Kit<N>) -> Result<Option<active::Phrase>> {
         if let Some(active) = active.as_mut() {
             if self.events.first().is_some_and(|v| v.step == 0) {
                 // phrase events start on first step
@@ -144,7 +146,7 @@ impl Phrase {
         Ok(None)
     }
 
-    fn generate_stamped<const N: usize>(&self, active: &mut active::Event, index: usize, step: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<Option<u16>> {
+    fn generate_stamped<const N: usize>(&self, active: &mut active::Event, index: usize, step: u16, bias: f32, drift: f32, pads: &pads::Kit<N>) -> Result<Option<u16>> {
         let drift = rand::random_range(0..=((drift * self.events.len() as f32 - 1.).round()) as usize);
         let index = (index + drift) % self.events.len();
         let stamped = &self.events[index];

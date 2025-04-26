@@ -12,12 +12,12 @@ pub struct Pad {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct Pads<const N: usize> {
+pub struct Kit<const N: usize> {
     #[serde(with = "serde_arrays")]
     pub inner: [Pad; N],
 }
 
-impl<const N: usize> Pads<N> {
+impl<const N: usize> Kit<N> {
     pub fn generate_pan(index: impl Into<usize>) -> f32 {
         index.into() as f32 / N as f32 - 0.5
     }
@@ -82,17 +82,17 @@ impl<const N: usize> Pads<N> {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Scene<const N: usize> {
     #[serde(with = "serde_arrays")]
-    pub kit_a: [Pads<N>; N],
+    pub kit_a: [Kit<N>; N],
     #[serde(with = "serde_arrays")]
-    pub kit_b: [Pads<N>; N],
+    pub kit_b: [Kit<N>; N],
 }
 
 impl<const N: usize> Scene<N> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            kit_a: core::array::from_fn(|_| Pads::<N>::new()),
-            kit_b: core::array::from_fn(|_| Pads::<N>::new()),
+            kit_a: core::array::from_fn(|_| Kit::<N>::new()),
+            kit_b: core::array::from_fn(|_| Kit::<N>::new()),
         }
     }
 }
@@ -117,8 +117,9 @@ struct BankHandler<const N: usize> {
     drift: f32,
     bias: f32,
     width: f32,
+    reverse: Option<f32>,
 
-    pads: Pads<N>,
+    kit: Kit<N>,
     input: active::Input,
     record: active::Record,
     pool: active::Pool,
@@ -131,8 +132,9 @@ impl<const N: usize> BankHandler<N> {
             drift: 0.,
             bias: 0.,
             width: 1.,
+            reverse: None,
 
-            pads: Pads::new(),
+            kit: Kit::new(),
             input: active::Input::new(),
             record: active::Record::new(),
             pool: active::Pool::new(),
@@ -154,21 +156,31 @@ impl<const N: usize> BankHandler<N> {
         };
         if tempo > 0. {
             if let active::Event::Hold(onset, ..) = active {
-                return Self::read_grain(onset, self.speed.net(), self.width, tempo, gain, buffer, channels);
+                return Self::read_grain(onset, self.speed.net(), self.width, self.reverse.is_some(), tempo, gain, buffer, channels);
             } else if let active::Event::Loop(onset, _, len) = active {
                 let wav = &mut onset.wav;
                 let pos = wav.pos()?;
-                let end = onset.start + (f32::from(*len) * wav.len as f32 / wav.steps as f32) as u64;
-                if end < pos || pos < onset.start && end < pos + wav.len {
-                    wav.seek(onset.start as i64)?;
+                let len = if let Some(steps) = wav.steps {
+                    (f32::from(*len) * wav.len as f32 / steps as f32) as u64 & !1
+                } else {
+                    (f32::from(*len) * super::SAMPLE_RATE as f32 * 60. / tempo * super::LOOP_DIV as f32) as u64 & !1
+                };
+                let end = onset.start + len;
+                if pos > end || pos < onset.start && pos + wav.len > end {
+                    if self.reverse.is_some() {
+                        wav.seek(end as i64)?;
+                    } else {
+                        wav.seek(onset.start as i64)?;
+                    }
                 }
-                return Self::read_grain(onset, self.speed.net(), self.width, tempo, gain, buffer, channels);
+                return Self::read_grain(onset, self.speed.net(), self.width, self.reverse.is_some(), tempo, gain, buffer, channels);
             }
         }
         Ok(())
     }
 
-    fn read_grain<T>(onset: &mut active::Onset, speed: f32, width: f32, tempo: f32, gain: f32, buffer: &mut [T], channels: usize) -> Result<()>
+    #[allow(clippy::too_many_arguments)]
+    fn read_grain<T>(onset: &mut active::Onset, speed: f32, width: f32, reverse: bool, tempo: f32, gain: f32, buffer: &mut [T], channels: usize) -> Result<()>
     where
         T: SizedSample + FromSample<f32>,
     {
@@ -191,10 +203,18 @@ impl<const N: usize> BankHandler<N> {
         }
         // resync from reading extra word for interpolation
         let pos = wav.pos()?;
-        wav.seek(pos as i64 - 2)?;
+        if reverse {
+            wav.seek(pos as i64 - rem as i64 * 2 - 2)?;
+        } else {
+            wav.seek(pos as i64 - 2)?;
+        }
         // resample via linear interpolation
         for i in 0..buffer.len() / channels {
-            let read_idx = i as f32 * speed;
+            let read_idx = if reverse {
+                (rem / 2 - 1) as f32- i as f32 * speed
+            } else {
+                i as f32 * speed
+            };
             let mut i16_buffer = [0u8; 2];
             // FIXME: support alternative channel counts?
             assert!(channels == 2);
@@ -217,14 +237,15 @@ impl<const N: usize> BankHandler<N> {
         Ok(())
     }
 
-    fn cmd(&mut self, quant: bool, clock: f32, kits: &mut [Pads<N>; N], cmd: super::BankCmd) -> Result<()> {
+    fn cmd(&mut self, quant: bool, clock: f32, kits: &mut [Kit<N>; N], cmd: super::BankCmd) -> Result<()> {
         match cmd {
             super::BankCmd::AssignSpeed(v) => self.speed.base = v,
             super::BankCmd::AssignDrift(v) => self.drift = v,
             super::BankCmd::AssignBias(v) => self.bias = v,
             super::BankCmd::AssignWidth(v) => self.width = v,
-            super::BankCmd::AssignKit(index) => kits[index as usize] = self.pads.clone(),
-            super::BankCmd::LoadKit(index) => self.pads = kits[index as usize].clone(),
+            super::BankCmd::AssignReverse(v) => self.assign_reverse(clock, v),
+            super::BankCmd::AssignKit(index) => kits[index as usize] = self.kit.clone(),
+            super::BankCmd::LoadKit(index) => self.kit = kits[index as usize].clone(),
             super::BankCmd::AssignOnset(index, alt, onset) => self.assign_onset(clock, index, alt, *onset)?,
             super::BankCmd::ForceEvent(event) => self.force_event(clock, event)?,
             super::BankCmd::PushEvent(event) => self.push_event(quant, clock, event)?,
@@ -236,9 +257,17 @@ impl<const N: usize> BankHandler<N> {
         Ok(())
     }
 
+    fn assign_reverse(&mut self, clock: f32, reverse: bool) {
+        if reverse {
+            self.reverse = Some(clock);
+        } else {
+            self.reverse = None;
+        }
+    }
+
     fn assign_onset(&mut self, clock: f32, index: u8, alt: bool, onset: super::Onset) -> Result<()> {
-        self.pads.inner[index as usize].onsets[alt as usize] = Some(onset);
-        self.input.active.trans(&super::Event::Hold { index }, clock as u16, self.bias, &self.pads)?;
+        self.kit.inner[index as usize].onsets[alt as usize] = Some(onset);
+        self.input.active.trans(&super::Event::Hold { index }, clock as u16, self.bias, &self.kit)?;
         Ok(())
     }
 
@@ -256,15 +285,17 @@ impl<const N: usize> BankHandler<N> {
                 match active {
                     active::Event::Hold(onset, step) => {
                         let wav = &mut onset.wav;
-                        if wav.tempo.is_some() {
-                            let offset = (wav.len as f32 / wav.steps as f32 * (clock - *step as f32)) as i64 & !1;
+                        if let Some(steps) = wav.steps {
+                            let clock = self.reverse.unwrap_or(clock);
+                            let offset = (wav.len as f32 / steps as f32 * (clock - *step as f32)) as i64 & !1;
                             wav.seek(onset.start as i64 + offset)?;
                         }
                     }
                     active::Event::Loop(onset, step, len) => {
                         let wav = &mut onset.wav;
-                        if wav.tempo.is_some() {
-                            let offset = (wav.len as f32 / wav.steps as f32 * ((clock - *step as f32) % f32::from(*len))) as i64 & !1;
+                        if let Some(steps) = wav.steps {
+                            let clock = self.reverse.unwrap_or(clock);
+                            let offset = (wav.len as f32 / steps as f32 * ((clock - *step as f32).rem_euclid(f32::from(*len)))) as i64 & !1;
                             wav.seek(onset.start as i64 + offset)?;
                         }
                     }
@@ -272,8 +303,17 @@ impl<const N: usize> BankHandler<N> {
                 }
             }
         }
-        self.tick_pool(clock)?;
+        self.tick_phrases(clock)?;
+        if let Some(clock) = self.reverse.as_mut() {
+            *clock -= 1.;
+        }
         Ok(())
+    }
+
+    fn stop(&mut self) {
+        if let Some(clock) = self.reverse.as_mut() {
+            *clock = 0.;
+        }
     }
 
     fn offset_speed(&mut self, v: f32) {
@@ -281,7 +321,7 @@ impl<const N: usize> BankHandler<N> {
     }
 
     fn force_event(&mut self, clock: f32, event: super::Event) -> Result<()> {
-        self.input.active.trans(&event, clock as u16, self.bias, &self.pads)?;
+        self.input.active.trans(&event, clock as u16, self.bias, &self.kit)?;
         Ok(())
     }
 
@@ -297,7 +337,7 @@ impl<const N: usize> BankHandler<N> {
     fn take_record(&mut self, index: Option<u8>) {
         if let Some((phrase, active)) = self.record.take() {
             if let Some(index) = index {
-                self.pads.inner[index as usize].phrase = Some(phrase);
+                self.kit.inner[index as usize].phrase = Some(phrase);
                 self.pool.next = 1;
                 self.pool.phrases.clear();
                 self.pool.phrases.push(index);
@@ -312,7 +352,7 @@ impl<const N: usize> BankHandler<N> {
             self.record.bake(clock as u16);
         }
         self.record.trim(len);
-        self.record.generate_phrase(clock as u16, self.bias, self.drift, &self.pads)?;
+        self.record.generate_phrase(clock as u16, self.bias, self.drift, &self.kit)?;
         Ok(())
     }
 
@@ -325,12 +365,15 @@ impl<const N: usize> BankHandler<N> {
     }
 
     fn process_input(&mut self, clock: f32, event: super::Event) -> Result<()> {
-        self.input.active.trans(&event, clock as u16, self.bias, &self.pads)?;
+        self.input.active.trans(&event, clock as u16, self.bias, &self.kit)?;
         self.record.push(event, clock as u16);
+        if let Some(reverse) = &mut self.reverse {
+            *reverse = clock;
+        }
         Ok(())
     }
 
-    fn tick_pool(&mut self, clock: f32) -> Result<()> {
+    fn tick_phrases(&mut self, clock: f32) -> Result<()> {
         // advance record phrase, if any
         if let Some(active::Phrase {
             next,
@@ -342,11 +385,11 @@ impl<const N: usize> BankHandler<N> {
             *phrase_rem = phrase_rem.saturating_sub(1);
             if *phrase_rem == 0 {
                 // generate next phrase from record
-                self.record.generate_phrase(clock as u16, self.bias, self.drift, &self.pads)?;
+                self.record.generate_phrase(clock as u16, self.bias, self.drift, &self.kit)?;
             } else if *event_rem == 0 {
                 // generate next event from record
                 if let Some(phrase) = self.record.phrase.as_mut() {
-                    if let Some(rem) = phrase.generate_stamped(active, *next, clock as u16, self.bias, self.drift, &self.pads)? {
+                    if let Some(rem) = phrase.generate_stamped(active, *next, clock as u16, self.bias, self.drift, &self.kit)? {
                         *next += 1;
                         *event_rem = rem;
                     }
@@ -364,11 +407,11 @@ impl<const N: usize> BankHandler<N> {
             *phrase_rem = phrase_rem.saturating_sub(1);
             if *phrase_rem == 0 {
                 // generate next phrase from pool
-                self.pool.generate_phrase(clock as u16, self.bias, self.drift, &self.pads)?;
+                self.pool.generate_phrase(clock as u16, self.bias, self.drift, &self.kit)?;
             } else if *event_rem == 0 {
                 // generate next event from pool
-                if let Some(phrase) = self.pool.index.and_then(|v| self.pads.inner[v as usize].phrase.as_ref()) {
-                    if let Some(rem) = phrase.generate_stamped(active, *next, clock as u16, self.bias, self.drift, &self.pads)? {
+                if let Some(phrase) = self.pool.index.and_then(|v| self.kit.inner[v as usize].phrase.as_ref()) {
+                    if let Some(rem) = phrase.generate_stamped(active, *next, clock as u16, self.bias, self.drift, &self.kit)? {
                         *next += 1;
                         *event_rem = rem;
                     }
@@ -376,7 +419,7 @@ impl<const N: usize> BankHandler<N> {
             }
         } else if !self.pool.phrases.is_empty() {
             // generate first phrase from pool
-            self.pool.generate_phrase(clock as u16, self.bias, self.drift, &self.pads)?;
+            self.pool.generate_phrase(clock as u16, self.bias, self.drift, &self.kit)?;
         }
         Ok(())
     }
@@ -438,14 +481,16 @@ impl<const N: usize> AudioHandler<N> {
 
     fn clock(&mut self) -> Result<()> {
         self.quant = true;
-        self.clock += 1.;
         self.bank_a.clock(self.clock)?;
         self.bank_b.clock(self.clock)?;
+        self.clock += 1.;
         Ok(())
     }
 
     fn stop(&mut self) {
         self.quant = false;
+        self.bank_a.stop();
+        self.bank_b.stop();
         self.clock = 0.;
     }
 

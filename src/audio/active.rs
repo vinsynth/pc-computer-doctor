@@ -6,7 +6,7 @@ use color_eyre::Result;
 
 pub struct Wav {
     pub tempo: Option<f32>,
-    pub steps: u16,
+    pub steps: Option<u16>,
     pub file: File,
     pub len: u64,
 }
@@ -39,7 +39,7 @@ pub enum Event {
 }
 
 impl Event {
-    pub fn trans<const N: usize>(&mut self, input: &super::Event, step: u16, bias: f32, pads: &pads::Pads<N>) -> Result<()> {
+    pub fn trans<const N: usize>(&mut self, input: &super::Event, step: u16, bias: f32, pads: &pads::Kit<N>) -> Result<()> {
         match input {
             super::Event::Sync => {
                 *self = Event::Sync;
@@ -53,22 +53,22 @@ impl Event {
                     onset.wav.file = onset.wav.file.try_clone()?;
                     *self = Event::Hold(onset, step);
                 } else if let Some(alt) = pads.generate_alt(*index, bias) {
-                    let onset = pads.onset_seek(*index, alt, pads::Pads::<N>::generate_pan(*index))?;
+                    let onset = pads.onset_seek(*index, alt, pads::Kit::<N>::generate_pan(*index))?;
                     *self = Event::Hold(onset, step);
                 }
             }
             super::Event::Loop { index, len } => {
                 match self {
-                    Event::Hold(onset, ..) | Event::Loop(onset, ..) if onset.index == *index => {
+                    Event::Hold(onset, step) | Event::Loop(onset, step, ..) if onset.index == *index => {
                         // recast event variant with same Onset
                         let uninit: &mut MaybeUninit<Onset> = unsafe { std::mem::transmute(onset) };
                         let mut onset = unsafe { std::mem::replace(uninit, MaybeUninit::uninit()).assume_init() };
                         // i don't know either, girl
                         onset.wav.file = onset.wav.file.try_clone()?;
-                        *self = Event::Loop(onset, step, *len);
+                        *self = Event::Loop(onset, *step, *len);
                     }
                     _ => if let Some(alt) = pads.generate_alt(*index, bias) {
-                        let onset = pads.onset(*index, alt, pads::Pads::<N>::generate_pan(*index))?;
+                        let onset = pads.onset(*index, alt, pads::Kit::<N>::generate_pan(*index))?;
                         *self = Event::Loop(onset, step, *len);
                     }
                 }
@@ -144,7 +144,7 @@ impl Record {
         self.phrase = Some(super::Phrase { events, len });
     }
 
-    pub fn generate_phrase<const N: usize>(&mut self, step: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<()> {
+    pub fn generate_phrase<const N: usize>(&mut self, step: u16, bias: f32, drift: f32, pads: &pads::Kit<N>) -> Result<()> {
         if let Some(phrase) = self.phrase.as_mut() {
             if let Some(phrase) = phrase.generate_active(&mut self.active, step, bias, drift, pads)? {
                 self.active = Some(phrase);
@@ -180,7 +180,7 @@ impl Pool {
         }
     }
 
-    pub fn generate_phrase<const N: usize>(&mut self, step: u16, bias: f32, drift: f32, pads: &pads::Pads<N>) -> Result<()> {
+    pub fn generate_phrase<const N: usize>(&mut self, step: u16, bias: f32, drift: f32, pads: &pads::Kit<N>) -> Result<()> {
         if self.phrases.is_empty() {
             self.next = 0;
             self.active = None;

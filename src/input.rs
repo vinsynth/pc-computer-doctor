@@ -194,12 +194,16 @@ impl BankHandler {
         Ok(())
     }
 
-    fn handle_reverse_up(&mut self) {
+    fn handle_reverse_up<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>) -> Result<()> {
         self.reverse = false;
+        pads_tx.send(audio_bank_cmd!(self.bank, AssignReverse, false))?;
+        Ok(())
     }
 
-    fn handle_reverse_down(&mut self) {
+    fn handle_reverse_down<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>) -> Result<()> {
         self.reverse = true;
+        pads_tx.send(audio_bank_cmd!(self.bank, AssignReverse, true))?;
+        Ok(())
     }
 
     fn handle_pad_up<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
@@ -349,7 +353,7 @@ impl InputHandler {
                         }
                         v if v == KeyCode::ReverseA as u8 => match &mut self.state {
                             GlobalState::Yield => {
-                                self.bank_a.handle_reverse_up();
+                                self.bank_a.handle_reverse_up(&mut self.pads_tx)?;
                             }
                             GlobalState::AssignOnset { paths, file_index, rd, onset_index, alt } => {
                                 *alt = false;
@@ -382,7 +386,7 @@ impl InputHandler {
                             self.bank_b.handle_pool_up(&mut self.pads_tx, &mut self.tui_tx)?;
                         }
                         v if v == KeyCode::ReverseB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_reverse_up();
+                            self.bank_b.handle_reverse_up(&mut self.pads_tx)?;
                         }
                         v if (KeyCode::BankBOffset as u8..KeyCode::BankBOffset as u8 + PAD_COUNT as u8).contains(&v) => {
                             let index = v - KeyCode::BankBOffset as u8;
@@ -562,7 +566,7 @@ impl InputHandler {
                         }
                         v if v == KeyCode::ReverseA as u8 => match &mut self.state {
                             GlobalState::Yield => {
-                                self.bank_a.handle_reverse_down();
+                                self.bank_a.handle_reverse_down(&mut self.pads_tx)?;
                             }
                             GlobalState::AssignOnset { paths, file_index, rd, onset_index, alt } => {
                                 *alt = true;
@@ -605,7 +609,7 @@ impl InputHandler {
                             self.bank_b.handle_pool_down(&mut self.pads_tx, &mut self.tui_tx)?;
                         }
                         v if v == KeyCode::ReverseB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_reverse_down();
+                            self.bank_b.handle_reverse_down(&mut self.pads_tx)?;
                         }
                         v if (KeyCode::BankBOffset as u8..KeyCode::BankBOffset as u8 + PAD_COUNT as u8).contains(&v) => {
                             let index = v - KeyCode::BankBOffset as u8;
