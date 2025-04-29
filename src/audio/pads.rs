@@ -113,6 +113,7 @@ impl<T: Copy + std::ops::Mul> Mod<T> {
 }
 
 struct BankHandler<const N: usize> {
+    gain: f32,
     speed: Mod<f32>,
     drift: f32,
     bias: f32,
@@ -128,6 +129,7 @@ struct BankHandler<const N: usize> {
 impl<const N: usize> BankHandler<N> {
     fn new() -> Self {
         Self {
+            gain: 1.,
             speed: Mod::new(1., 1.),
             drift: 0.,
             bias: 0.,
@@ -141,7 +143,7 @@ impl<const N: usize> BankHandler<N> {
         }
     }
 
-    fn read_attenuated<T>(&mut self, tempo: f32, gain: f32, buffer: &mut [T], channels: usize) -> Result<()>
+    fn read_attenuated<T>(&mut self, tempo: f32, buffer: &mut [T], channels: usize) -> Result<()>
     where
         T: SizedSample + FromSample<f32>,
     {
@@ -156,7 +158,7 @@ impl<const N: usize> BankHandler<N> {
         };
         if tempo > 0. {
             if let active::Event::Hold(onset, ..) = active {
-                return Self::read_grain(onset, self.speed.net(), self.width, self.reverse.is_some(), tempo, gain, buffer, channels);
+                return Self::read_grain(onset, self.gain, self.speed.net(), self.width, self.reverse.is_some(), tempo, buffer, channels);
             } else if let active::Event::Loop(onset, _, len) = active {
                 let wav = &mut onset.wav;
                 let pos = wav.pos()?;
@@ -173,14 +175,14 @@ impl<const N: usize> BankHandler<N> {
                         wav.seek(onset.start as i64)?;
                     }
                 }
-                return Self::read_grain(onset, self.speed.net(), self.width, self.reverse.is_some(), tempo, gain, buffer, channels);
+                return Self::read_grain(onset, self.gain, self.speed.net(), self.width, self.reverse.is_some(), tempo, buffer, channels);
             }
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn read_grain<T>(onset: &mut active::Onset, speed: f32, width: f32, reverse: bool, tempo: f32, gain: f32, buffer: &mut [T], channels: usize) -> Result<()>
+    fn read_grain<T>(onset: &mut active::Onset, gain: f32, speed: f32, width: f32, reverse: bool, tempo: f32, buffer: &mut [T], channels: usize) -> Result<()>
     where
         T: SizedSample + FromSample<f32>,
     {
@@ -239,6 +241,7 @@ impl<const N: usize> BankHandler<N> {
 
     fn cmd(&mut self, quant: bool, clock: f32, kits: &mut [Kit<N>; N], cmd: super::BankCmd) -> Result<()> {
         match cmd {
+            super::BankCmd::AssignGain(v) => self.gain = v,
             super::BankCmd::AssignSpeed(v) => self.speed.base = v,
             super::BankCmd::AssignDrift(v) => self.drift = v,
             super::BankCmd::AssignBias(v) => self.bias = v,
@@ -431,7 +434,6 @@ pub struct AudioHandler<const N: usize> {
     tempo: f32,
     scene: Scene<N>,
 
-    blend: f32,
     bank_a: BankHandler<N>,
     bank_b: BankHandler<N>,
 
@@ -446,7 +448,6 @@ impl<const N: usize> AudioHandler<N> {
             tempo: 0.,
             scene: Scene::new(),
 
-            blend: 0.5,
             bank_a: BankHandler::new(),
             bank_b: BankHandler::new(),
 
@@ -463,7 +464,6 @@ impl<const N: usize> AudioHandler<N> {
                 super::Cmd::Clock => self.clock()?,
                 super::Cmd::Stop => self.stop(),
                 super::Cmd::AssignTempo(v) => self.tempo = v,
-                super::Cmd::AssignBlend(v) => self.blend = v,
                 super::Cmd::OffsetSpeed(v) => self.offset_speed(v),
                 super::Cmd::SaveScene(v) => self.save_scene(v)?,
                 super::Cmd::LoadScene(v) => self.scene = *v,
@@ -474,8 +474,8 @@ impl<const N: usize> AudioHandler<N> {
             }
         }
         buffer.fill(T::EQUILIBRIUM);
-        self.bank_a.read_attenuated(self.tempo, 1. - self.blend, buffer, channels)?;
-        self.bank_b.read_attenuated(self.tempo, self.blend, buffer, channels)?;
+        self.bank_a.read_attenuated(self.tempo, buffer, channels)?;
+        self.bank_b.read_attenuated(self.tempo, buffer, channels)?;
         Ok(())
     }
 

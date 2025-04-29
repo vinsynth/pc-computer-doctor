@@ -13,58 +13,60 @@ pub enum Bank {
 
 /**
     chords:
-        Record\*: bake phrase \*
+        Reverse\*: reverse bank playback
+        Hold\*: toggle hold
+        Kit\* + Pad\*: load pad's kit
+        Shift\* + Reverse\*: init record
+            bake phrase \*
             first Pad\*: assign phrase to pad
             more Pad\*s: phrase len
-            release Record\*: take phrase, assign if first held
-        Kit\* + Pad\*: load pad's kit
-        Kit\* + Record\* + Pad\*: assign *'s pads to pad's kit
-        Pool\* + Pad\* + ...: build phrase pool from pads'
-        Reverse\*: reverse \* playback
-        Reverse\* + Pool\*: toggle \* hold
+            release Reverse\*: take phrase, assign to first held pad, if any
+        Shift\* + Hold\*: init build pool
+            Pad\*s: push pads' phrase to pool
+            release Hold\*: clear pool if unchanged
+        Shift\* + Kit\* + Pad\*: save bank to pad's kit
 
-        Shift + KitA: open onset fs
-            RecordA: decrement
-            PoolA: increment
-            KitA: into wav/dir
+        Global + HoldB: open onset fs
+            KitB: decrement
+            ShiftB: increment
+            HoldB: into wav/dir
             in wav:
-                RecordA: decrement
-                PoolA: increment
+                KitB: decrement
+                ShiftB: increment
                 Pad\*: assign to first Pad\* onset
-                ReverseA + Pad\*: assign to second Pad\* onset
-                KitA: exit wav
-            release Shift: exit fs
-        Shift + PoolA: opene scene fs
-            RecordA: decrement
-            PoolA: increment
-            KitA: load scene / into dir
-            release Shift: exit fs
-        Shift + RecordA: save active scene to new .sd
+                Reverse\* + Pad\*: assign to second Pad\* onset
+            release Global: exit fs
+        Global + KitB: open scene fs
+            KitB: decrement
+            ShiftB: increment
+            HoldB: load scene / into dir
+            release Global: exit fs
+        Global + ReverseB: save active scene to new .sd
 */
 enum KeyCode {
-    Global = 48,
-    
-    RecordA = 49,
-    KitA = 50,
-    PoolA = 51,
-    ReverseA = 52,
-    BankAOffset = 53,
-    
-    RecordB = 61,
-    KitB = 62,
-    PoolB = 63,
+    BankAOffset = 48,
+    ShiftA = 56,
+    ReverseA = 57,
+    KitA = 58,
+    HoldA = 59,
+
+    Global = 60,
+
+    KitB = 61,
+    HoldB = 62,
+    ShiftB = 63,
     ReverseB = 64,
     BankBOffset = 65,
 }
 
 enum CtrlCode {
-    Blend = 83,
-
+    GainA = 23,
     SpeedA = 105,
     DriftA = 106,
     BiasA = 29,
     WidthA = 26,
     
+    GainB = 83,
     SpeedB = 102,
     DriftB = 103,
     BiasB = 28,
@@ -103,8 +105,9 @@ struct BankHandler {
     bank: Bank,
     hold: bool,
     reverse: bool,
-    state: BankState,
     downs: Vec<u8>,
+    shift: bool,
+    state: BankState,
 }
 
 macro_rules! audio_bank_cmd {
@@ -132,77 +135,105 @@ impl BankHandler {
             hold: false,
             reverse: false,
             downs: Vec::new(),
+            shift: false,
             state: BankState::LoadOnset,
         }
     }
 
-    fn handle_record_up<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
-        self.state = BankState::LoadOnset;
-        pads_tx.send(audio_bank_cmd!(self.bank, TakeRecord, self.downs.first().copied()))?;
-        tui_tx.send(tui_bank_cmd!(self.bank, LoadOnset))?;
+    fn handle_reverse_up<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
+        match self.state {
+            BankState::LoadOnset => {
+                self.reverse = false;
+                pads_tx.send(audio_bank_cmd!(self.bank, AssignReverse, false))?;
+            }
+            BankState::BakeRecord => {
+                // exit record
+                self.state = BankState::LoadOnset;
+                pads_tx.send(audio_bank_cmd!(self.bank, TakeRecord, self.downs.first().copied()))?;
+                tui_tx.send(tui_bank_cmd!(self.bank, LoadOnset))?;
+            }
+            _ => (),
+        }
         Ok(())
     }
 
-    fn handle_record_down<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
-        if let BankState::LoadKit = self.state {
-            self.state = BankState::AssignKit;
-            tui_tx.send(tui_bank_cmd!(self.bank, AssignKit, None))?;
-        } else {
-            self.state = BankState::BakeRecord;
-            self.hold = false;
-            if self.downs.is_empty() {
-                pads_tx.send(audio_bank_cmd!(self.bank, PushEvent, audio::Event::Sync))?;
+    fn handle_reverse_down<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
+        if let BankState::LoadOnset = self.state {
+            if self.shift {
+                // init record
+                self.state = BankState::BakeRecord;
+                self.hold = false;
+                if self.downs.is_empty() {
+                    pads_tx.send(audio_bank_cmd!(self.bank, PushEvent, audio::Event::Sync))?;
+                }
+                pads_tx.send(audio_bank_cmd!(self.bank, BakeRecord, audio::MAX_PHRASE_LEN))?;
+                tui_tx.send(tui_bank_cmd!(self.bank, BakeRecord, None, audio::MAX_PHRASE_LEN))?;
+            } else {
+                self.reverse = true;
+                pads_tx.send(audio_bank_cmd!(self.bank, AssignReverse, true))?;
             }
-            pads_tx.send(audio_bank_cmd!(self.bank, BakeRecord, audio::MAX_PHRASE_LEN))?;
-            tui_tx.send(tui_bank_cmd!(self.bank, BakeRecord, None, audio::MAX_PHRASE_LEN))?;
+        }
+        Ok(())
+    }
+
+    fn handle_hold_up<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
+        if let BankState::BuildPool { cleared } = self.state {
+            // exit build pool
+            if !cleared {
+                pads_tx.send(audio_bank_cmd!(self.bank, ClearPool))?;
+                tui_tx.send(tui_bank_cmd!(self.bank, ClearPool))?;
+            }
+            self.state = BankState::LoadOnset;
+            tui_tx.send(tui_bank_cmd!(self.bank, LoadOnset))?;
+        }
+        Ok(())
+    }
+
+    fn handle_hold_down<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
+        if let BankState::LoadOnset = self.state {
+            if self.shift {
+                // init build pool
+                self.state = BankState::BuildPool { cleared: false };
+                tui_tx.send(tui_bank_cmd!(self.bank, BuildPool))?;
+            } else {
+                self.hold = !self.hold;
+                if !self.hold && self.downs.is_empty() {
+                    pads_tx.send(audio_bank_cmd!(self.bank, PushEvent, audio::Event::Sync))?;
+                }
+            }
         }
         Ok(())
     }
 
     fn handle_kit_up(&mut self, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
-        self.state = BankState::LoadOnset;
-        tui_tx.send(tui_bank_cmd!(self.bank, LoadOnset))?;
+        match self.state {
+            BankState::LoadKit => {
+                // exit load kit
+                self.state = BankState::LoadOnset;
+                tui_tx.send(tui_bank_cmd!(self.bank, LoadOnset))?;
+            }
+            BankState::AssignKit => {
+                // exit assign kit
+                self.state = BankState::LoadOnset;
+                tui_tx.send(tui_bank_cmd!(self.bank, LoadOnset))?;
+            }
+            _ => (),
+        }
         Ok(())
     }
 
     fn handle_kit_down(&mut self, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
-        self.state = BankState::LoadKit;
-        tui_tx.send(tui_bank_cmd!(self.bank, LoadKit, None))?;
-        Ok(())
-    }
-
-    fn handle_pool_up<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
-        if let BankState::BuildPool { cleared: false } = self.state {
-            pads_tx.send(audio_bank_cmd!(self.bank, ClearPool))?;
-            tui_tx.send(tui_bank_cmd!(self.bank, ClearPool))?;
-        }
-        self.state = BankState::LoadOnset;
-        tui_tx.send(tui_bank_cmd!(self.bank, LoadOnset))?;
-        Ok(())
-    }
-
-    fn handle_pool_down<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>, tui_tx: &mut Sender<tui::Cmd>) -> Result<()> {
-        if self.reverse {
-            self.hold = !self.hold;
-            if !self.hold && self.downs.is_empty() {
-                pads_tx.send(audio_bank_cmd!(self.bank, PushEvent, audio::Event::Sync))?;
+        if let BankState::LoadOnset = self.state {
+            if self.shift {
+                // init assign kit
+                self.state = BankState::AssignKit;
+                tui_tx.send(tui_bank_cmd!(self.bank, AssignKit, None))?;
+            } else {
+                // init load kit
+                self.state = BankState::LoadKit;
+                tui_tx.send(tui_bank_cmd!(self.bank, LoadKit, None))?;
             }
-        } else {
-            self.state = BankState::BuildPool { cleared: false };
-            tui_tx.send(tui_bank_cmd!(self.bank, BuildPool))?;
         }
-        Ok(())
-    }
-
-    fn handle_reverse_up<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>) -> Result<()> {
-        self.reverse = false;
-        pads_tx.send(audio_bank_cmd!(self.bank, AssignReverse, false))?;
-        Ok(())
-    }
-
-    fn handle_reverse_down<const N: usize>(&mut self, pads_tx: &mut Sender<audio::Cmd<N>>) -> Result<()> {
-        self.reverse = true;
-        pads_tx.send(audio_bank_cmd!(self.bank, AssignReverse, true))?;
         Ok(())
     }
 
@@ -276,7 +307,7 @@ impl BankHandler {
                 let len = audio::Fraction::new(numerator, audio::LOOP_DIV);
                 pads_tx.send(audio_bank_cmd!(self.bank, PushEvent, audio::Event::Loop { index, len }))?;
             } else {
-                // init loop stop || jump
+                // init loop stop | jump
                 pads_tx.send(audio_bank_cmd!(self.bank, PushEvent, audio::Event::Hold { index }))?;
             }
         } else {
@@ -338,32 +369,8 @@ impl InputHandler {
             LiveEvent::Midi { message, .. } => {
                 match message {
                     MidiMessage::NoteOff{ key, .. } => match key.as_int() {
-                        v if v == KeyCode::Global as u8 => {
-                            self.state = GlobalState::Yield;
-                            self.tui_tx.send(tui::Cmd::Yield)?;
-                        }
-                        v if v == KeyCode::RecordA as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_a.handle_record_up(&mut self.pads_tx, &mut self.tui_tx)?;
-                        }
-                        v if v == KeyCode::KitA as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_a.handle_kit_up(&mut self.tui_tx)?;
-                        }
-                        v if v == KeyCode::PoolA as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_a.handle_pool_up(&mut self.pads_tx, &mut self.tui_tx)?;
-                        }
-                        v if v == KeyCode::ReverseA as u8 => match &mut self.state {
-                            GlobalState::Yield => {
-                                self.bank_a.handle_reverse_up(&mut self.pads_tx)?;
-                            }
-                            GlobalState::AssignOnset { paths, file_index, rd, onset_index, alt } => {
-                                *alt = false;
-                                let name = paths[*file_index].file_stem().unwrap().to_str().unwrap().to_string();
-                                self.tui_tx.send(tui::Cmd::AssignOnset { name, index: *onset_index, count: rd.onsets.len(), alt: *alt })?;
-                            }
-                            _ => (),
-                        }
                         v if (KeyCode::BankAOffset as u8..KeyCode::BankAOffset as u8 + PAD_COUNT as u8).contains(&v) => {
-                            let index = v - KeyCode::BankAOffset as u8;
+                            let index = PAD_COUNT as u8 - 1 - (v - KeyCode::BankAOffset as u8);
                             self.bank_a.downs.retain(|&v| v != index);
                             self.tui_tx.send(tui_bank_cmd!(Bank::A, Pad, index, false))?;
                             match self.state {
@@ -372,21 +379,41 @@ impl InputHandler {
                                 }
                                 GlobalState::AssignOnset { .. } => {
                                     self.pads_tx.send(audio_bank_cmd!(Bank::A, ForceEvent, audio::Event::Sync))?;
-                                },
+                                }
                                 _ => (),
                             }
                         }
-                        v if v == KeyCode::RecordB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_record_up(&mut self.pads_tx, &mut self.tui_tx)?;
+                        v if v == KeyCode::ShiftA as u8 => self.bank_a.shift = false,
+                        v if v == KeyCode::ReverseA as u8 => if let GlobalState::Yield = self.state {
+                            self.bank_a.handle_reverse_up(&mut self.pads_tx, &mut self.tui_tx)?;
+                        }
+                        v if v == KeyCode::KitA as u8 => if let GlobalState::Yield = self.state {
+                            self.bank_a.handle_kit_up(&mut self.tui_tx)?;
+                        }
+                        v if v == KeyCode::HoldA as u8 => if let GlobalState::Yield = self.state {
+                            self.bank_a.handle_hold_up(&mut self.pads_tx, &mut self.tui_tx)?;
+                        }
+                        v if v == KeyCode::Global as u8 => {
+                            self.state = GlobalState::Yield;
+                            self.tui_tx.send(tui::Cmd::Yield)?;
                         }
                         v if v == KeyCode::KitB as u8 => if let GlobalState::Yield = self.state {
                             self.bank_b.handle_kit_up(&mut self.tui_tx)?;
                         }
-                        v if v == KeyCode::PoolB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_pool_up(&mut self.pads_tx, &mut self.tui_tx)?;
+                        v if v == KeyCode::HoldB as u8 => if let GlobalState::Yield = self.state {
+                            self.bank_b.handle_hold_up(&mut self.pads_tx, &mut self.tui_tx)?;
                         }
-                        v if v == KeyCode::ReverseB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_reverse_up(&mut self.pads_tx)?;
+                        v if v == KeyCode::ShiftB as u8 => self.bank_b.shift = false,
+                        v if v == KeyCode::ReverseB as u8 => match &mut self.state {
+                            GlobalState::Yield => {
+                                self.bank_b.handle_reverse_up(&mut self.pads_tx, &mut self.tui_tx)?;
+                            }
+                            GlobalState::AssignOnset { paths, file_index, rd, onset_index, alt } => {
+                                *alt = false;
+                                let name = paths[*file_index].file_stem().unwrap().to_str().unwrap().to_string();
+                                self.tui_tx.send(tui::Cmd::AssignOnset { name, index: *onset_index, count: rd.onsets.len(), alt: *alt })?;
+                            }
+                            _ => (),
                         }
                         v if (KeyCode::BankBOffset as u8..KeyCode::BankBOffset as u8 + PAD_COUNT as u8).contains(&v) => {
                             let index = v - KeyCode::BankBOffset as u8;
@@ -405,21 +432,55 @@ impl InputHandler {
                         _ => (),
                     }
                     MidiMessage::NoteOn { key, .. } => match key.as_int() {
-                        v if v == KeyCode::Global as u8 => self.state = GlobalState::Prime,
-                        v if v == KeyCode::RecordA as u8 => match &mut self.state {
-                            GlobalState::Yield => {
-                                self.bank_a.handle_record_down(&mut self.pads_tx, &mut self.tui_tx)?;
-                            }
-                            GlobalState::Prime => {
-                                // save active scene for both banks
-                                let mut index = 0;
-                                let mut file = std::fs::File::create_new(format!("scenes/scene{}.sd", index));
-                                while file.is_err() {
-                                    index += 1;
-                                    file = std::fs::File::create_new(format!("scenes/scene{}.sd", index));
+                        v if (KeyCode::BankAOffset as u8..KeyCode::BankAOffset as u8 + PAD_COUNT as u8).contains(&v) => {
+                            let index = PAD_COUNT as u8 - 1 - (v - KeyCode::BankAOffset as u8);
+                            self.bank_a.downs.push(index);
+                            self.tui_tx.send(tui_bank_cmd!(Bank::A, Pad, index, true))?;
+                            match &self.state {
+                                GlobalState::Yield => {
+                                    self.bank_a.handle_pad_down(&mut self.pads_tx, &mut self.tui_tx)?;
                                 }
-                                self.pads_tx.send(audio::Cmd::SaveScene(file?))?;
-                                self.tui_tx.send(tui::Cmd::SaveScene(format!("scenes/scene{}.sd", index)))?;
+                                GlobalState::AssignOnset { paths, file_index, rd, onset_index, alt } => {
+                                    // assign onset to pad
+                                    let len = std::fs::metadata(&paths[*file_index])?.len() - 44;
+                                    let start = rd.onsets[*onset_index];
+                                    let wav = audio::Wav {
+                                        tempo: rd.tempo,
+                                        steps: rd.steps,
+                                        path: paths[*file_index].clone(),
+                                        len,
+                                    };
+                                    let onset = audio::Onset { wav, start };
+                                    self.pads_tx.send(audio_bank_cmd!(Bank::A, AssignOnset, index, *alt, Box::new(onset)))?;
+                                }
+                                _ => (),
+                            }
+                        }
+                        v if v == KeyCode::ShiftA as u8 => self.bank_a.shift = true,
+                        v if v == KeyCode::ReverseA as u8 => if let GlobalState::Yield = self.state {
+                            self.bank_a.handle_reverse_down(&mut self.pads_tx, &mut self.tui_tx)?;
+                        }
+                        v if v == KeyCode::KitA as u8 => if let GlobalState::Yield = self.state {
+                            self.bank_a.handle_kit_down(&mut self.tui_tx)?;
+                        }
+                        v if v == KeyCode::HoldA as u8 => if let GlobalState::Yield = self.state {
+                            self.bank_a.handle_hold_down(&mut self.pads_tx, &mut self.tui_tx)?;
+                        }
+                        v if v == KeyCode::Global as u8 => self.state = GlobalState::Prime,
+                        v if v == KeyCode::KitB as u8 => match &mut self.state {
+                            GlobalState::Yield => self.bank_b.handle_kit_down(&mut self.tui_tx)?,
+                            GlobalState::Prime => {
+                                // open scene dir
+                                let mut paths = std::fs::read_dir("scenes")?
+                                    .flat_map(|v| Some(v.ok()?.path().into_boxed_path()))
+                                    .filter(|v| v.extension().unwrap() == "sd" || v.is_dir())
+                                    .collect::<Vec<_>>();
+                                paths.sort();
+                                self.tui_tx.send(tui::Cmd::LoadScene(to_fs_at!(paths, 0)))?;
+                                self.state = GlobalState::LoadScene {
+                                    paths,
+                                    file_index: 0,
+                                };
                             }
                             GlobalState::LoadScene { paths, file_index } => {
                                 // decrement file index
@@ -438,10 +499,8 @@ impl InputHandler {
                                 self.tui_tx.send(tui::Cmd::AssignOnset { name, index: *onset_index, count: rd.onsets.len(), alt: *alt })?;
                             }
                         }
-                        v if v == KeyCode::KitA as u8 => match &self.state {
-                            GlobalState::Yield => {
-                                self.bank_a.handle_kit_down(&mut self.tui_tx)?;
-                            }
+                        v if v == KeyCode::HoldB as u8 => match &mut self.state {
+                            GlobalState::Yield => self.bank_b.handle_hold_down(&mut self.pads_tx, &mut self.tui_tx)?,
                             GlobalState::Prime => {
                                 // open onset dir
                                 let mut paths = std::fs::read_dir("onsets")?
@@ -530,22 +589,19 @@ impl InputHandler {
                                 self.state = GlobalState::LoadWav { paths: paths.clone(), file_index: 0 };
                             }
                         }
-                        v if v == KeyCode::PoolA as u8 => match &mut self.state {
-                            GlobalState::Yield => {
-                                self.bank_a.handle_pool_down(&mut self.pads_tx, &mut self.tui_tx)?;
-                            }
+                        v if v == KeyCode::ShiftB as u8 => self.bank_b.shift = true,
+                        v if v == KeyCode::ReverseB as u8 => match &mut self.state {
+                            GlobalState::Yield => self.bank_b.handle_reverse_down(&mut self.pads_tx, &mut self.tui_tx)?,
                             GlobalState::Prime => {
-                                // open scene dir
-                                let mut paths = std::fs::read_dir("scenes")?
-                                    .flat_map(|v| Some(v.ok()?.path().into_boxed_path()))
-                                    .filter(|v| v.extension().unwrap() == "sd" || v.is_dir())
-                                    .collect::<Vec<_>>();
-                                paths.sort();
-                                self.tui_tx.send(tui::Cmd::LoadScene(to_fs_at!(paths, 0)))?;
-                                self.state = GlobalState::LoadScene {
-                                    paths,
-                                    file_index: 0,
-                                };
+                                // save active scene for both banks
+                                let mut index = 0;
+                                let mut file = std::fs::File::create_new(format!("scenes/scene{}.sd", index));
+                                while file.is_err() {
+                                    index += 1;
+                                    file = std::fs::File::create_new(format!("scenes/scene{}.sd", index));
+                                }
+                                self.pads_tx.send(audio::Cmd::SaveScene(file?))?;
+                                self.tui_tx.send(tui::Cmd::SaveScene(format!("scenes/scene{}.sd", index)))?;
                             }
                             GlobalState::LoadScene { paths, file_index } => {
                                 // increment file index
@@ -563,53 +619,6 @@ impl InputHandler {
                                 let name = paths[*file_index].file_stem().unwrap().to_str().unwrap().to_string();
                                 self.tui_tx.send(tui::Cmd::AssignOnset { name, index: *onset_index, count: rd.onsets.len(), alt: *alt })?;
                             }
-                        }
-                        v if v == KeyCode::ReverseA as u8 => match &mut self.state {
-                            GlobalState::Yield => {
-                                self.bank_a.handle_reverse_down(&mut self.pads_tx)?;
-                            }
-                            GlobalState::AssignOnset { paths, file_index, rd, onset_index, alt } => {
-                                *alt = true;
-                                let name = paths[*file_index].file_stem().unwrap().to_str().unwrap().to_string();
-                                self.tui_tx.send(tui::Cmd::AssignOnset { name, index: *onset_index, count: rd.onsets.len(), alt: *alt })?;
-                            }
-                            _ => (),
-                        }
-                        v if (KeyCode::BankAOffset as u8..KeyCode::BankAOffset as u8 + PAD_COUNT as u8).contains(&v) => {
-                            let index = v - KeyCode::BankAOffset as u8;
-                            self.bank_a.downs.push(index);
-                            self.tui_tx.send(tui_bank_cmd!(Bank::A, Pad, index, true))?;
-                            match &self.state {
-                                GlobalState::Yield => {
-                                    self.bank_a.handle_pad_down(&mut self.pads_tx, &mut self.tui_tx)?;
-                                }
-                                GlobalState::AssignOnset { paths, file_index, rd, onset_index, alt } => {
-                                    // assign onset to pad
-                                    let len = std::fs::metadata(&paths[*file_index])?.len() - 44;
-                                    let start = rd.onsets[*onset_index];
-                                    let wav = audio::Wav {
-                                        tempo: rd.tempo,
-                                        steps: rd.steps,
-                                        path: paths[*file_index].clone(),
-                                        len,
-                                    };
-                                    let onset = audio::Onset { wav, start };
-                                    self.pads_tx.send(audio_bank_cmd!(Bank::A, AssignOnset, index, *alt, Box::new(onset)))?;
-                                }
-                                _ => (),
-                            }
-                        }
-                        v if v == KeyCode::RecordB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_record_down(&mut self.pads_tx, &mut self.tui_tx)?;
-                        }
-                        v if v == KeyCode::KitB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_kit_down(&mut self.tui_tx)?;
-                        }
-                        v if v == KeyCode::PoolB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_pool_down(&mut self.pads_tx, &mut self.tui_tx)?;
-                        }
-                        v if v == KeyCode::ReverseB as u8 => if let GlobalState::Yield = self.state {
-                            self.bank_b.handle_reverse_down(&mut self.pads_tx)?;
                         }
                         v if (KeyCode::BankBOffset as u8..KeyCode::BankBOffset as u8 + PAD_COUNT as u8).contains(&v) => {
                             let index = v - KeyCode::BankBOffset as u8;
@@ -638,8 +647,8 @@ impl InputHandler {
                         _ => (),
                     }
                     MidiMessage::Controller { controller, value } => match controller.as_int() {
-                        v if v == CtrlCode::Blend as u8 => {
-                            self.pads_tx.send(audio::Cmd::AssignBlend(value.as_int() as f32 / 127.))?;
+                        v if v == CtrlCode::GainA as u8 => {
+                            self.pads_tx.send(audio_bank_cmd!(Bank::A, AssignGain, value.as_int() as f32 / 127. * 2.))?;
                         }
                         v if v == CtrlCode::SpeedA as u8 => {
                             self.pads_tx.send(audio_bank_cmd!(Bank::A, AssignSpeed, value.as_int() as f32 / 127. * 2.))?;
@@ -654,6 +663,9 @@ impl InputHandler {
                         }
                         v if v == CtrlCode::WidthA as u8 => {
                             self.pads_tx.send(audio_bank_cmd!(Bank::A, AssignWidth, value.as_int() as f32 / 127.))?;
+                        }
+                        v if v == CtrlCode::GainB as u8 => {
+                            self.pads_tx.send(audio_bank_cmd!(Bank::B, AssignGain, value.as_int() as f32 / 127. * 2.))?;
                         }
                         v if v == CtrlCode::SpeedB as u8 => {
                             self.pads_tx.send(audio_bank_cmd!(Bank::B, AssignSpeed, value.as_int() as f32 / 127. * 2.))?;

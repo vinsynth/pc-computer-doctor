@@ -16,7 +16,6 @@ pub enum Cmd<const N: usize> {
     Clock,
     Stop,
     AssignTempo(f32),
-    AssignBlend(f32),
     OffsetSpeed(f32),
     SaveScene(std::fs::File),
     LoadScene(Box<pads::Scene<N>>),
@@ -24,6 +23,7 @@ pub enum Cmd<const N: usize> {
 }
 
 pub enum BankCmd {
+    AssignGain(f32),
     AssignSpeed(f32),
     AssignDrift(f32),
     AssignBias(f32),
